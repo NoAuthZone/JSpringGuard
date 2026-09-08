@@ -1655,6 +1655,9 @@ def analyze_build_file(path: str, root: str) -> List[Finding]:
 #      (looks packages up ONLY in the local file - makes no network call at all)
 
 OSV_API_QUERY_URL = "https://api.osv.dev/v1/query"
+# Deliberately conservative: osv.dev is a free public service, and hammering it
+# with many parallel requests is the quickest way to get rate limited.
+OSV_MAX_CONCURRENCY = 4
 
 _MAVEN_GROUP_RE = re.compile(r"<groupId>\s*([^<\s]+)\s*</groupId>")
 _MAVEN_ARTIFACT_RE = re.compile(r"<artifactId>\s*([^<\s]+)\s*</artifactId>")
@@ -1731,43 +1734,133 @@ def _normalize_maven_version_for_osv(version: str) -> str:
 
 
 def osv_query_online(group: str, artifact: str, version: str,
-                     timeout: float = 8.0) -> Tuple[Optional[dict], Optional[str]]:
+                     timeout: float = 8.0, retries: int = 3) -> Tuple[Optional[dict], Optional[str]]:
     """A single live query to osv.dev. Returns (response, None) on success, or
     (None, error_message) on any network/HTTP/parse error - the caller can
     then tell a real failure apart from "no vulnerabilities found", and show
-    the user what actually went wrong instead of silently reporting zero."""
+    the user what actually went wrong instead of silently reporting zero.
+
+    Retries with exponential backoff on rate limiting (429) and transient
+    server errors (5xx). This matters because the queries run in parallel: a
+    burst of concurrent requests is exactly what makes a public API push back,
+    and without a retry every package would fail at once and produce an empty
+    cache that looks indistinguishable from "nothing found".
+    """
     import urllib.request
     import urllib.error
+    import time
 
     body = json.dumps({
         "version": version,
         "package": {"name": f"{group}:{artifact}", "ecosystem": "Maven"},
     }).encode("utf-8")
-    req = urllib.request.Request(
-        OSV_API_QUERY_URL, data=body,
-        headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8")), None
-    except urllib.error.HTTPError as exc:
+
+    last_error = "unknown error"
+    for attempt in range(retries):
+        req = urllib.request.Request(
+            OSV_API_QUERY_URL, data=body,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": f"JSpringGuard/{VERSION}"},
+            method="POST")
         try:
-            detail = exc.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            detail = ""
-        return None, f"HTTP {exc.code} {exc.reason}" + (f" - {detail}" if detail else "")
-    except urllib.error.URLError as exc:
-        return None, f"connection failed: {exc.reason}"
-    except TimeoutError:
-        return None, "timed out"
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8")), None
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:200]
+            except Exception:
+                detail = ""
+            last_error = f"HTTP {exc.code} {exc.reason}" + (f" - {detail}" if detail else "")
+            # 429 = rate limited, 5xx = transient server-side problem: worth retrying.
+            if exc.code == 429 or 500 <= exc.code < 600:
+                if attempt < retries - 1:
+                    time.sleep(1.5 * (2 ** attempt))
+                    continue
+            return None, last_error
+        except urllib.error.URLError as exc:
+            last_error = f"connection failed: {exc.reason}"
+        except TimeoutError:
+            last_error = "timed out"
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+        if attempt < retries - 1:
+            time.sleep(1.5 * (2 ** attempt))
+    return None, last_error
+
+
+_CVSS3_AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
+_CVSS3_AC = {"L": 0.77, "H": 0.44}
+_CVSS3_PR_U = {"N": 0.85, "L": 0.62, "H": 0.27}   # scope unchanged
+_CVSS3_PR_C = {"N": 0.85, "L": 0.68, "H": 0.50}   # scope changed
+_CVSS3_UI = {"N": 0.85, "R": 0.62}
+_CVSS3_CIA = {"H": 0.56, "L": 0.22, "N": 0.0}
+
+
+def cvss3_base_score(vector: str) -> Optional[float]:
+    """Computes the CVSS v3.0/3.1 base score from a vector string, per the
+    official FIRST specification. Returns None if the vector is not a
+    parseable CVSS v3 vector.
+
+    This matters because OSV/GHSA advisories almost always carry the vector
+    but not a numeric score. Without this, every such advisory collapses to
+    one blanket severity, which makes the report far less useful for
+    prioritising - a 'low' and a 'critical' would look identical."""
+    if not vector or not vector.upper().startswith("CVSS:3"):
+        return None
+    parts = dict()
+    for chunk in vector.split("/")[1:]:
+        if ":" in chunk:
+            k, _, v = chunk.partition(":")
+            parts[k.upper()] = v.upper()
+    try:
+        av = _CVSS3_AV[parts["AV"]]
+        ac = _CVSS3_AC[parts["AC"]]
+        ui = _CVSS3_UI[parts["UI"]]
+        scope_changed = parts["S"] == "C"
+        pr = (_CVSS3_PR_C if scope_changed else _CVSS3_PR_U)[parts["PR"]]
+        c = _CVSS3_CIA[parts["C"]]
+        i = _CVSS3_CIA[parts["I"]]
+        a = _CVSS3_CIA[parts["A"]]
+    except KeyError:
+        return None
+
+    iss = 1 - ((1 - c) * (1 - i) * (1 - a))
+    if scope_changed:
+        impact = 7.52 * (iss - 0.029) - 3.25 * ((iss - 0.02) ** 15)
+    else:
+        impact = 6.42 * iss
+    if impact <= 0:
+        return 0.0
+    exploitability = 8.22 * av * ac * pr * ui
+    raw = min((1.08 if scope_changed else 1.0) * (impact + exploitability), 10.0)
+
+    # CVSS 3.1 "roundup": smallest number to one decimal >= the value, done in
+    # integer arithmetic to avoid float artefacts (as the spec prescribes).
+    scaled = int(round(raw * 100000))
+    if scaled % 10000 == 0:
+        return scaled / 100000.0
+    return (int(scaled / 10000) + 1) / 10.0
+
+
+def _score_to_severity(score: float) -> str:
+    if score >= 9.0:
+        return "CRITICAL"
+    if score >= 7.0:
+        return "HIGH"
+    if score >= 4.0:
+        return "MEDIUM"
+    if score > 0.0:
+        return "LOW"
+    return "INFO"
 
 
 def _osv_severity(vuln: dict) -> str:
-    """Best-effort mapping of an OSV vulnerability record to our severity
-    scale. OSV does not always carry a normalized severity, so this checks a
-    few known shapes and falls back to MEDIUM rather than over- or
-    under-stating an unknown risk."""
+    """Maps an OSV vulnerability record to our severity scale.
+
+    Order of preference: the advisory's own normalized severity, then a bare
+    numeric CVSS score, then a base score computed from the CVSS vector.
+    Falls back to MEDIUM only when none of those are present, rather than
+    over- or under-stating an unknown risk."""
     db_sev = str((vuln.get("database_specific") or {}).get("severity", "")).upper()
     mapping = {"CRITICAL": "CRITICAL", "HIGH": "HIGH", "MODERATE": "MEDIUM",
               "MEDIUM": "MEDIUM", "LOW": "LOW"}
@@ -1775,26 +1868,11 @@ def _osv_severity(vuln: dict) -> str:
         return mapping[db_sev]
     for sev in vuln.get("severity") or []:
         score_field = str(sev.get("score", "")).strip()
-        # Only trust a bare numeric score (e.g. "9.8"). OSV's CVSS entries are
-        # usually a full vector string like "CVSS:3.1/AV:N/AC:L/.../A:H" with
-        # no numeric base score included - naively regex-extracting a number
-        # from that string would grab the "3.1" CVSS *version*, not a score.
-        # Computing a real base score from a vector needs the CVSS formula,
-        # which is out of scope here.
         if re.fullmatch(r"\d+(?:\.\d+)?", score_field):
-            score = float(score_field)
-            if score >= 9.0:
-                return "CRITICAL"
-            if score >= 7.0:
-                return "HIGH"
-            if score >= 4.0:
-                return "MEDIUM"
-            return "LOW"
-    if vuln.get("severity"):
-        # A CVSS vector was present but not a bare score - OSV/GHSA only
-        # attaches CVSS scoring to vulnerabilities considered notable, so
-        # treat its mere presence as at least HIGH rather than guessing.
-        return "HIGH"
+            return _score_to_severity(float(score_field))
+        computed = cvss3_base_score(score_field)
+        if computed is not None:
+            return _score_to_severity(computed)
     return "MEDIUM"
 
 
@@ -1854,7 +1932,12 @@ def osv_check_build_files(build_files: List[str], root: str,
 
         items = list(unique.items())
         if jobs > 1 and len(items) > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(jobs, len(items))) as pool:
+            # Cap concurrency for OSV regardless of --jobs: --jobs is meant for
+            # local file reading, where a high value is harmless. Pointing the
+            # same number at a free public API is not - too many simultaneous
+            # requests is what triggers rate limiting in the first place.
+            osv_workers = min(jobs, len(items), OSV_MAX_CONCURRENCY)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=osv_workers) as pool:
                 fetched = list(pool.map(_fetch, items))
         else:
             fetched = [_fetch(it) for it in items]
@@ -1875,15 +1958,32 @@ def osv_check_build_files(build_files: List[str], root: str,
         data = results.get(f"{group}:{artifact}@{version}")
         if not data:
             continue
+        # OSV frequently returns several records describing the SAME issue -
+        # typically a GHSA advisory plus the CVE it aliases. Reporting both
+        # would double-count the same vulnerability for the same package, so
+        # keep the first record of each alias group.
+        seen_ids: Set[str] = set()
         for v in data.get("vulns") or []:
             vid = v.get("id", "UNKNOWN")
+            # A withdrawn advisory is one the database itself retracted - it is
+            # not a finding and must not be reported.
+            if v.get("withdrawn"):
+                continue
+            id_group = {vid} | {str(a) for a in (v.get("aliases") or [])}
+            if seen_ids & id_group:
+                continue
+            seen_ids |= id_group
             summary = (v.get("summary") or (v.get("details") or "")[:200]).strip()
             snippet = f"{group}:{artifact}:{version}"
+            aliases = [a for a in (v.get("aliases") or []) if a != vid]
+            note = summary or f"See https://osv.dev/vulnerability/{vid}"
+            if aliases:
+                note += f" (also known as {', '.join(aliases[:3])})"
             out.append(Finding(
                 file=rel, line=1, rule_id=f"OSV-{vid}",
                 rule_name=f"OSV advisory {vid} for {group}:{artifact}",
                 severity=_osv_severity(v), status="VULNERABLE", code=snippet,
-                note=summary or f"See https://osv.dev/vulnerability/{vid}",
+                note=note,
                 fix=f"Check {vid} at https://osv.dev/vulnerability/{vid} for the fixed version(s).",
                 fingerprint=fingerprint(rel, f"OSV-{vid}", snippet)))
     return out, len(occurrences), len(unique), failed, first_error
@@ -2151,13 +2251,42 @@ max-width:220px}
 .type-filter:hover{border-color:var(--accent-soft)}
 .type-filter:focus{outline:none;border-color:var(--accent)}
 .type-filter option{color:var(--text);background:var(--surface-2)}
-.mini-btn{flex:none;background:var(--surface-2);border:1px solid var(--line);color:var(--dim);
+.mini-btn{flex:none;display:inline-flex;align-items:center;justify-content:center;
+background:var(--surface-2);border:1px solid var(--line);color:var(--dim);
 font-size:12.5px;font-weight:600;padding:10px 14px;border-radius:var(--r-sm);cursor:pointer;
 white-space:nowrap;transition:all .12s}
 .mini-btn:hover{color:var(--text);border-color:var(--accent-soft);background:var(--surface-3)}
 @media (max-width:560px){.filter-row{flex-wrap:wrap}.type-filter{max-width:none;width:100%}
 .mini-btn{width:100%}}
 .empty-note{color:var(--faint);font-size:13px;text-align:center;padding:40px 12px}
+.triage{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;
+padding-top:10px;border-top:1px dashed var(--line-soft)}
+.triage label{font-size:11px;color:var(--faint);letter-spacing:.04em;text-transform:uppercase;
+font-weight:700}
+.triage-status{background:var(--surface-2);color:var(--text);border:1px solid var(--line);
+border-radius:var(--r-sm);padding:5px 9px;font-size:12px;font-family:var(--sans);cursor:pointer}
+.triage-status:focus{outline:none;border-color:var(--accent)}
+.triage-status option{color:var(--text);background:var(--surface-2)}
+.triage-note{flex:1;min-width:160px;background:var(--surface-2);color:var(--text);
+border:1px solid var(--line);border-radius:var(--r-sm);padding:5px 9px;font-size:12px;
+font-family:var(--sans)}
+.triage-note::placeholder{color:var(--faint)}
+.triage-note:focus{outline:none;border-color:var(--accent)}
+.triage-saved{font-size:11px;color:var(--keep);opacity:0;transition:opacity .2s}
+.triage-saved.show{opacity:1}
+/* A triaged finding is dimmed so untouched ones stand out while working. */
+.card.triaged{opacity:.62}
+.card.triaged:hover{opacity:1}
+.badge.st{border:1px solid var(--line);background:transparent;color:var(--dim);
+text-transform:none;letter-spacing:0;font-weight:600}
+.badge.st[data-st="fixed"]{color:var(--keep);border-color:var(--keep)}
+.badge.st[data-st="false-positive"]{color:var(--accent);border-color:var(--accent)}
+.badge.st[data-st="accepted"]{color:var(--warn);border-color:var(--warn)}
+.badge.st[data-st="in-review"]{color:var(--dim);border-color:var(--dim)}
+.triage-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 18px;
+padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md)}
+.triage-bar .count{font-size:12px;color:var(--dim);margin-right:auto}
+.triage-bar .count b{color:var(--text)}
 .card{background:var(--surface);border:1px solid var(--line);border-left-width:4px;border-radius:var(--r-lg);
 box-shadow:var(--shadow);padding:16px 18px;margin:0 0 14px}
 .card.CRITICAL{border-left-color:var(--critical);box-shadow:var(--shadow),0 0 0 1px var(--critical-soft) inset}
@@ -2226,18 +2355,22 @@ if(toggle) toggle.addEventListener('click', function(){
 var search=document.getElementById('findingSearch');
 var typeFilter=document.getElementById('typeFilter');
 var sevFilter=document.getElementById('severityFilter');
+var statusFilter=document.getElementById('statusFilter');
 var chips=document.getElementById('sevChips');
 function applyFilters(){
   var q = search ? search.value.toLowerCase() : '';
   var t = typeFilter ? typeFilter.value : '';
   var s = sevFilter ? sevFilter.value : '';
+  var st = statusFilter ? statusFilter.value : '';
   var cards=document.querySelectorAll('.card');
   var shown=0;
   cards.forEach(function(c){
     var textHit = c.getAttribute('data-search').indexOf(q) !== -1;
     var typeHit = !t || c.getAttribute('data-type') === t;
     var sevHit = !s || c.classList.contains(s);
-    var hit = textHit && typeHit && sevHit;
+    var cardStatus = c.getAttribute('data-status') || '';
+    var statusHit = !st || (st === '__open' ? cardStatus === '' : cardStatus === st);
+    var hit = textHit && typeHit && sevHit && statusHit;
     c.style.display = hit ? '' : 'none';
     if(hit) shown++;
   });
@@ -2252,6 +2385,7 @@ function applyFilters(){
 if(search) search.addEventListener('input', applyFilters);
 if(typeFilter) typeFilter.addEventListener('change', applyFilters);
 if(sevFilter) sevFilter.addEventListener('change', applyFilters);
+if(statusFilter) statusFilter.addEventListener('change', applyFilters);
 if(chips) chips.querySelectorAll('div').forEach(function(d){
   d.addEventListener('click', function(){
     var sev = d.getAttribute('data-sev');
@@ -2265,6 +2399,136 @@ if(toggleFixes) toggleFixes.addEventListener('click', function(){
   var anyClosed = Array.prototype.some.call(details, function(d){ return !d.open; });
   details.forEach(function(d){ d.open = anyClosed; });
   toggleFixes.textContent = anyClosed ? 'Collapse all fixes' : 'Expand all fixes';
+});
+
+/* ---- Triage: per-finding status + note, keyed by fingerprint ----------
+   The fingerprint is stable across re-scans, so a decision made in one
+   report can be imported into the next one and still match. Stored in
+   localStorage for convenience; Export/Import makes it portable and
+   shareable (localStorage is per-browser and can be cleared at any time,
+   so it must not be the only copy of real triage work).             */
+var TKEY='jspringguardTriage';
+var triage={};
+try{ triage = JSON.parse(localStorage.getItem(TKEY) || '{}') || {}; }catch(e){ triage={}; }
+
+var STATUS_LABEL={'in-review':'In review','fixed':'Fixed',
+                  'false-positive':'False positive','accepted':'Accepted risk'};
+
+function saveTriage(){
+  try{ localStorage.setItem(TKEY, JSON.stringify(triage)); }catch(e){}
+}
+function flashSaved(el){
+  var card = el.closest('.card');
+  var tag = card && card.querySelector('.triage-saved');
+  if(!tag) return;
+  tag.classList.add('show');
+  setTimeout(function(){ tag.classList.remove('show'); }, 900);
+}
+function renderCardTriage(card){
+  var sel = card.querySelector('.triage-status');
+  if(!sel) return;
+  var fp = sel.getAttribute('data-fp');
+  var entry = triage[fp] || {};
+  var status = entry.status || '';
+  sel.value = status;
+  var note = card.querySelector('.triage-note');
+  if(note) note.value = entry.note || '';
+  card.setAttribute('data-status', status);
+  card.classList.toggle('triaged', status !== '');
+  var old = card.querySelector('.badge.st');
+  if(old) old.remove();
+  if(status){
+    var b = document.createElement('span');
+    b.className = 'badge st';
+    b.setAttribute('data-st', status);
+    b.textContent = STATUS_LABEL[status] || status;
+    var head = card.querySelector('.card-head');
+    if(head) head.appendChild(b);
+  }
+}
+function updateTriageCount(){
+  var cards = document.querySelectorAll('.card');
+  var done = 0;
+  cards.forEach(function(c){ if(c.getAttribute('data-status')) done++; });
+  var el = document.getElementById('triageCount');
+  if(el) el.innerHTML = 'Triaged <b>' + done + '</b> of <b>' + cards.length + '</b> finding(s)';
+}
+function renderAllTriage(){
+  document.querySelectorAll('.card').forEach(renderCardTriage);
+  updateTriageCount();
+}
+renderAllTriage();
+
+document.querySelectorAll('.triage-status').forEach(function(sel){
+  sel.addEventListener('change', function(){
+    var fp = sel.getAttribute('data-fp');
+    var card = sel.closest('.card');
+    var note = card.querySelector('.triage-note');
+    var entry = triage[fp] || {};
+    entry.status = sel.value;
+    entry.note = note ? note.value : '';
+    entry.ts = new Date().toISOString();
+    if(!entry.status && !entry.note) delete triage[fp]; else triage[fp] = entry;
+    saveTriage(); renderCardTriage(card); updateTriageCount(); flashSaved(sel);
+    applyFilters();
+  });
+});
+document.querySelectorAll('.triage-note').forEach(function(inp){
+  inp.addEventListener('change', function(){
+    var fp = inp.getAttribute('data-fp');
+    var card = inp.closest('.card');
+    var sel = card.querySelector('.triage-status');
+    var entry = triage[fp] || {};
+    entry.note = inp.value;
+    entry.status = sel ? sel.value : '';
+    entry.ts = new Date().toISOString();
+    if(!entry.status && !entry.note) delete triage[fp]; else triage[fp] = entry;
+    saveTriage(); flashSaved(inp);
+  });
+});
+
+var exportBtn=document.getElementById('exportTriage');
+if(exportBtn) exportBtn.addEventListener('click', function(){
+  var payload = {tool:'JSpringGuard', kind:'triage', version:1,
+                 exported: new Date().toISOString(), entries: triage};
+  var blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'jspringguard-triage.json';
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+});
+
+var importInput=document.getElementById('importTriage');
+if(importInput) importInput.addEventListener('change', function(){
+  var file = importInput.files && importInput.files[0];
+  if(!file) return;
+  var reader = new FileReader();
+  reader.onload = function(){
+    try{
+      var data = JSON.parse(reader.result);
+      var entries = data && data.entries ? data.entries : data;
+      if(typeof entries !== 'object' || entries === null) throw new Error('unexpected format');
+      var added = 0;
+      Object.keys(entries).forEach(function(fp){
+        triage[fp] = entries[fp]; added++;
+      });
+      saveTriage(); renderAllTriage(); applyFilters();
+      alert('Imported ' + added + ' triage entr' + (added===1?'y':'ies') + '.');
+    }catch(err){
+      alert('Could not read that file as a JSpringGuard triage export:\\n' + err);
+    }
+    importInput.value = '';
+  };
+  reader.readAsText(file);
+});
+
+var clearBtn=document.getElementById('clearTriage');
+if(clearBtn) clearBtn.addEventListener('click', function(){
+  if(!confirm('Remove all statuses and notes stored in this browser?\\n' +
+              'Export first if you want to keep them.')) return;
+  triage = {};
+  saveTriage(); renderAllTriage(); applyFilters();
 });
 })();
 """
@@ -2338,9 +2602,28 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
         for sev in reversed(SEVERITY_LIST):
             sev_opts.append(f"<option value='{esc(sev)}'>{esc(sev)} ({counts.get(sev, 0)})</option>")
         parts.append("<select id='severityFilter' class='type-filter'>" + "".join(sev_opts) + "</select>")
+        parts.append("<select id='statusFilter' class='type-filter'>"
+                     "<option value=''>All statuses</option>"
+                     "<option value='__open'>Open (untriaged)</option>"
+                     "<option value='in-review'>In review</option>"
+                     "<option value='fixed'>Fixed</option>"
+                     "<option value='false-positive'>False positive</option>"
+                     "<option value='accepted'>Accepted risk</option>"
+                     "</select>")
         parts.append("<button type='button' id='toggleFixes' class='mini-btn' "
                      "title='Expand or collapse every Fix template at once'>Expand all fixes</button>")
         parts.append("</div>")
+        parts.append(
+            "<div class='triage-bar'>"
+            "<span class='count' id='triageCount'></span>"
+            "<button type='button' id='exportTriage' class='mini-btn' "
+            "title='Download your statuses and notes as JSON'>Export triage</button>"
+            "<label class='mini-btn' for='importTriage' "
+            "title='Load a previously exported triage file'>Import triage"
+            "<input type='file' id='importTriage' accept='.json,application/json' hidden></label>"
+            "<button type='button' id='clearTriage' class='mini-btn' "
+            "title='Remove all statuses and notes stored in this browser'>Clear</button>"
+            "</div>")
 
     if not findings:
         parts.append("<div class='empty-note'>No findings above the configured threshold.</div>")
@@ -2377,6 +2660,21 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
         fix_text = f.fix or (rule.fix if rule else "")
         if fix_text:
             parts.append(f"<details class='fix'><summary>Fix template</summary><pre>{esc(fix_text)}</pre></details>")
+        # Triage row: the status is keyed by the finding's fingerprint, which is
+        # stable across re-scans, so a decision made here survives into the next
+        # report as long as the underlying code line is unchanged.
+        parts.append(
+            "<div class='triage'><label>Status</label>"
+            f"<select class='triage-status' data-fp='{esc(f.fingerprint)}'>"
+            "<option value=''>Open</option>"
+            "<option value='in-review'>In review</option>"
+            "<option value='fixed'>Fixed</option>"
+            "<option value='false-positive'>False positive</option>"
+            "<option value='accepted'>Accepted risk</option>"
+            "</select>"
+            f"<input type='text' class='triage-note' data-fp='{esc(f.fingerprint)}' "
+            "placeholder='Note (optional) — why fixed / why accepted …'>"
+            "<span class='triage-saved'>saved</span></div>")
         parts.append("</div>")
 
     parts.append(f"<footer class='site-foot'>JSpringGuard <b>v{VERSION}</b> &middot; "
@@ -2706,7 +3004,7 @@ public class ShortHardcodedSecret {
 
 
 def run_selftest() -> int:
-    tmp = tempfile.mkdtemp(prefix="seccheck_")
+    tmp = tempfile.mkdtemp(prefix="jspringguard_")
     for name, content in SAMPLES.items():
         with open(os.path.join(tmp, name), "w", encoding="utf-8") as fh:
             fh.write(content)
@@ -2897,7 +3195,7 @@ EXT_BY_FORMAT = {"html": ".html", "markdown": ".md", "json": ".json", "sarif": "
 
 def auto_report_path(fmt: str, root: str) -> str:
     """Builds an auto-generated report filename in the current directory, e.g.
-    security-check-myproject-20260905-142301.html. Used whenever --format is
+    jspringguard-myproject-20260905-142301.html. Used whenever --format is
     not 'text' and --out was not given, so html/json/sarif/markdown reports
     always land in a file instead of being dumped to the terminal."""
     import datetime
@@ -2905,7 +3203,7 @@ def auto_report_path(fmt: str, root: str) -> str:
     ext = EXT_BY_FORMAT.get(fmt, ".txt")
     base = os.path.basename(os.path.abspath(root)) if root else "report"
     base = re.sub(r"[^\w.-]", "_", base) or "report"
-    return f"security-check-{base}-{ts}{ext}"
+    return f"jspringguard-{base}-{ts}{ext}"
 
 
 def auto_osv_cache_path(root: str) -> str:
