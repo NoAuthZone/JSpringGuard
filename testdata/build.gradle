@@ -1,0 +1,21 @@
+// Test fixture for JSpringGuard — Gradle build-hygiene checks.
+// Deliberately problematic. Do NOT copy into a real project.
+
+repositories {
+    // EXPECT: deprecated repository
+    jcenter()
+    // EXPECT: non-reproducible in CI
+    mavenLocal()
+    maven {
+        // EXPECT: plaintext HTTP + explicitly allowed insecure protocol
+        url 'http://repo.example.com/maven2'
+        allowInsecureProtocol = true
+    }
+}
+
+dependencies {
+    // EXPECT: known-vulnerable version
+    implementation 'com.thoughtworks.xstream:xstream:1.4.10'
+    // EXPECT: mutable SNAPSHOT version
+    implementation 'com.example:internal-lib:1.0.0-SNAPSHOT'
+}
