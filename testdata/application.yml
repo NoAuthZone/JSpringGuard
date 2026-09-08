@@ -1,0 +1,8 @@
+# Test fixture for JSpringGuard - YAML configuration checks.
+# Deliberately insecure. Do NOT copy into a real project.
+management:
+  endpoints:
+    web:
+      exposure:
+        # EXPECT: sensitive actuator endpoints exposed without a wildcard
+        include: health,env,heapdump,threaddump
