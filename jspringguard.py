@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Security-Check 3.1 - static analysis of JVM source code for XXE and Spring
+Security-Check 3.4 - static analysis of JVM source code for XXE and Spring
 Security weaknesses.
 
-STANDALONE TOOL: this single file is everything you need. No Semgrep, no
+STANDALONE TOOL: this single file is everything you need for its native rules. No Semgrep,
 CodeQL CLI/database, no other scripts, and no third-party Python packages -
 just this file and a Python 3.8+ interpreter. Any mention of "CodeQL" below
 refers to detection techniques that have been ported into this file's own
 Python rules; it does not mean CodeQL needs to be installed or run.
 
-New since 1.x:
-  * method-precise scope instead of file scope (fewer false negatives)
-  * resolution of helper factories across the whole project
-  * dependency check for pom.xml / build.gradle (dom4j, XStream, JDOM, ...)
-  * baseline file for CI (hide known findings)
-  * inline suppression via "sec-check:ignore"
-  * additional sinks: Spring OXM, Jackson XmlMapper, SOAP, XmlPullParser, ...
-  * output as text / json / sarif / markdown / html, parallel processing
+
 
 New in 3.0 (Spring Security):
   * CSRF: disabled, GET-only matchers, missing token checks
@@ -36,6 +29,20 @@ New in 3.1 (merged from the standalone scanners, still zero external tools):
     extra config rules, and the Spring CodeQL detection techniques re-implemented
     natively in Python (no CodeQL install required to get this coverage)
 
+New in 3.3:
+  * one inventory and cached source shared by all source analyzers
+  * module-local web/security combinations and Data REST dependency review
+  * XSS response/template review and missing request-body validation checks
+  * --list-rules and SARIF helpUri documentation links
+  * --context N in all reports (introduced in 3.2)
+
+New in 3.4:
+  * repeatable --include-rule/--exclude-rule globs (enable/disable aliases)
+  * opt-in effective Maven/Gradle runtime graphs via --resolve-deps
+  * structured method AST and intraprocedural request-to-sink data flow
+  * visible source-to-sink flow paths in text, HTML, Markdown, JSON and SARIF
+  * optional --codeql-sarif import for CodeQL Action/CLI results without bundling CodeQL
+
 No third-party dependencies. Python 3.8+.
 
 Examples:
@@ -44,6 +51,8 @@ Examples:
     python3 jspringguard.py . --format html --out report.html
     python3 jspringguard.py . --write-baseline .sec-baseline.json
     python3 jspringguard.py . --baseline .sec-baseline.json --fail-on HIGH
+    python3 jspringguard.py . --include-rule 'SRC-XSS-*' --exclude-rule '*-WRITER'
+    python3 jspringguard.py . --resolve-deps --check-osv
     python3 jspringguard.py --selftest
     python3 jspringguard.py --fix CSRF CORS
     python3 jspringguard.py --poc
@@ -55,18 +64,22 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import fnmatch
 import hashlib
 import html as html_mod
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import urllib.parse
 from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-VERSION = "3.1.0"
+VERSION = "3.4.3"
 AUTHOR = "NoAuthZone"
 AUTHOR_URL = "https://github.com/NoAuthZone"
 REPO_URL = "https://github.com/NoAuthZone/JSpringGuard"
@@ -419,6 +432,7 @@ SPRING_GUARD_PATTERNS: dict = {
     "CSRF_MATCHER":          re.compile(r"requireCsrfProtectionMatcher\s*\(", re.I),
     # Auth
     "AUTH_REQUIRED":         re.compile(r"\.authenticated\(\)|\.hasRole\s*\(|\.hasAuthority\s*\(|\.hasAnyRole\s*\(|\.hasAnyAuthority\s*\(|\.access\s*\(", re.I),
+    "METHOD_SECURITY_ENABLED": re.compile(r"@Enable(?:Global)?MethodSecurity\b"),
     "FORM_LOGIN_SECURED":    re.compile(r"\.formLogin\s*\((?!.*disable)", re.I),
     "HTTP_BASIC_SECURED":    re.compile(r"\.httpBasic\s*\((?!.*disable)", re.I),
     "OAUTH2_SECURED":        re.compile(r"\.oauth2Login\s*\(|\.oauth2ResourceServer\s*\(", re.I),
@@ -695,9 +709,11 @@ SS_RULES: List[Rule] = [
 
     # ---- Security Headers ----
     Rule("SpringSecurityCheck-HEADERS-DISABLED", "Security header configuration disabled",
-         re.compile(r"\.headers\s*\(\s*(?:h\s*->|HeadersConfigurer)?\s*"
-                    r"(?:h\s*\.)?\s*(?:frameOptions\s*\(\s*\)\s*\.\s*disable|"
-                    r"disable\s*\(\s*\))\s*\)", re.I),
+         re.compile(r"\.frameOptions\s*\(\s*\w+\s*->\s*\w+\s*\.\s*disable\s*\(\s*\)"
+                    r"|\.headers\s*\(\s*(?:\w+\s*->\s*\w+\s*\.\s*)?"
+                    r"(?:frameOptions\s*\(\s*\w+\s*->\s*\w+\s*\.\s*disable\s*\(\s*\)\s*\)|"
+                    r"disable\s*\(\s*\))\s*\)"
+                    r"|\.headers\s*\(\s*\)\s*\.\s*frameOptions\s*\(\s*\)\s*\.\s*disable\s*\(", re.I),
          "MEDIUM", [], [],
          "Security-relevant HTTP headers are disabled.",
          always_report=True, kind="antipattern", fix=FIX_HEADERS),
@@ -847,13 +863,14 @@ SS_RULES: List[Rule] = [
     # ---- Method Security ----
     Rule("SpringSecurityCheck-NO-METHOD-SECURITY", "@EnableMethodSecurity missing",
          re.compile(r"@EnableWebSecurity", re.I),
-         "LOW", [["AUTH_REQUIRED"]], [],
+         "LOW", [["METHOD_SECURITY_ENABLED"]], [],
          "@EnableMethodSecurity not found - fine-grained method security "
          "(@PreAuthorize, @Secured) is not active.",
          fix=FIX_METHOD_SEC),
 
     Rule("SpringSecurityCheck-CROSS-ORIGIN-BROAD", "@CrossOrigin without explicit origins",
-         re.compile(r"@CrossOrigin\s*(?:\(\s*\)|\(\s*origins\s*=\s*\"\*\"\))", re.I),
+         re.compile(r"@CrossOrigin\s*(?:\(\s*\)|\(\s*origins\s*=\s*\"\*\"\)|"
+                    r"\((?![^)]*\borigins\s*=)[^)]*\ballowCredentials\s*=\s*(?:true|\"true\")\s*[^)]*\))", re.I),
          "HIGH", [], [],
          "@CrossOrigin without explicit origins allows requests from any site. "
          "Use a global CORS configuration instead of the annotation.",
@@ -971,14 +988,16 @@ PROP_RULES: List[Tuple[str, re.Pattern, str, str, str]] = [
      "HIGH", "All actuator endpoints exposed.", FIX_ACTUATOR),
     ("SpringSecurityCheck-PROP-SHUTDOWN", re.compile(r"management\.endpoint\.shutdown\.enabled\s*[=:]\s*true", re.I),
      "CRITICAL", "Shutdown actuator enabled.", FIX_ACTUATOR),
-    ("SpringSecurityCheck-PROP-DEVTOOLS", re.compile(r"spring\.devtools\.restart\.enabled\s*[=:]\s*true|"
-                                     r"spring\.h2\.console\.enabled\s*[=:]\s*true", re.I),
-     "MEDIUM", "DevTools/H2 console enabled in production.", ""),
+    ("SpringSecurityCheck-PROP-DEVTOOLS", re.compile(
+        r"spring\.devtools\.(?:restart|remote\.restart)\.enabled\s*[=:]\s*true", re.I),
+     "MEDIUM", "Spring DevTools restart support enabled; verify it is disabled in production.", ""),
     ("SpringSecurityCheck-PROP-WEAK-JWT-SECRET", re.compile(r"(?:jwt\.secret|jwt-secret|app\.secret)\s*[=:]\s*\S{1,20}$", re.I | re.M),
      "HIGH", "JWT secret shorter than 20 characters - too weak for HMAC signatures.", FIX_JWT),
     ("SpringSecurityCheck-PROP-PLAIN-PASSWORD", re.compile(r"(?:spring\.datasource\.password|"
-                                           r"spring\.security\.user\.password)\s*[=:]\s*\S+", re.I),
-     "LOW", "Database password in a configuration file - better read it from a secrets store.", ""),
+                                           r"spring\.security\.user\.password)\s*[=:]\s*"
+                                           r"(?!\s*(?:\$\{|#\{|ENC\(|\s*$))\S+", re.I),
+     "LOW", "Database password in a configuration file - better read it from a secrets store. "
+            "Placeholders such as ${DB_PASSWORD} are not flagged.", ""),
     ("SpringSecurityCheck-PROP-SSL-DISABLED", re.compile(r"server\.ssl\.enabled\s*[=:]\s*false", re.I),
      "HIGH", "TLS/HTTPS explicitly disabled - all data is transmitted unencrypted.", ""),
     ("SpringSecurityCheck-PROP-MGMT-SEC-OFF", re.compile(r"management\.security\.enabled\s*[=:]\s*false", re.I),
@@ -1095,6 +1114,89 @@ MAVEN_ARTIFACT_ONLY = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>")
 MAVEN_PROPERTY = re.compile(r"<([\w.\-]+)>\s*([\d][\d.\-_a-zA-Z]+)\s*</\1>")
 MAVEN_PROPERTY_REF = re.compile(r"\$\{([\w.\-]+)\}")
 
+# --- Maven: parent chain + <dependencyManagement> resolution --------------
+# A large share of real poms declare no <version> on a dependency at all: the
+# version comes from <dependencyManagement>, either in the same pom or in a
+# parent pom of a multi-module build. Without resolving those, such entries
+# have no version to check and are simply skipped - i.e. silently unscanned.
+_MAVEN_PARENT_BLOCK = re.compile(r"<parent>(.*?)</parent>", re.S | re.I)
+_MAVEN_RELPATH = re.compile(r"<relativePath>\s*([^<]*?)\s*</relativePath>", re.I)
+_MAVEN_DEPMGMT_BLOCK = re.compile(r"<dependencyManagement>(.*?)</dependencyManagement>", re.S | re.I)
+_MAVEN_DEP_ENTRY = re.compile(r"<dependency>(.*?)</dependency>", re.S | re.I)
+_MAVEN_TAG_GROUP = re.compile(r"<groupId>\s*([^<\s]+)\s*</groupId>", re.I)
+_MAVEN_TAG_ARTIFACT = re.compile(r"<artifactId>\s*([^<\s]+)\s*</artifactId>", re.I)
+_MAVEN_TAG_VERSION = re.compile(r"<version>\s*([^<\s]+)\s*</version>", re.I)
+
+
+def _maven_parent_pom_path(pom_path: str, content: str) -> Optional[str]:
+    """Locates the parent pom of a multi-module build ON DISK.
+
+    Honours an explicit <relativePath>, otherwise falls back to Maven's own
+    default of '../pom.xml'. Only local files are considered - resolving a
+    parent from a remote repository would need network access and is a
+    separate, opt-in concern."""
+    m = _MAVEN_PARENT_BLOCK.search(content)
+    if not m:
+        return None
+    block = m.group(1)
+    base = os.path.dirname(os.path.abspath(pom_path))
+    rel = _MAVEN_RELPATH.search(block)
+    if rel:
+        raw = rel.group(1).strip()
+        if not raw:                       # <relativePath/> means "no local parent"
+            return None
+        cand = os.path.normpath(os.path.join(base, raw))
+        if os.path.isdir(cand):
+            cand = os.path.join(cand, "pom.xml")
+    else:
+        cand = os.path.normpath(os.path.join(base, "..", "pom.xml"))
+    return cand if os.path.isfile(cand) else None
+
+
+def maven_resolution_context(pom_path: str, content: str,
+                             max_depth: int = 6) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Builds (properties, managed_versions) for a pom, walking up the local
+    parent chain.
+
+    managed_versions is keyed both by 'groupId:artifactId' and by bare
+    'artifactId', because the rule set matches on the artifact alone.
+    Values closer to the child win, mirroring Maven's own precedence.
+    Returns raw strings; ${...} placeholders are resolved by the caller
+    against the merged properties."""
+    chain: List[str] = []
+    seen: Set[str] = set()
+    cur_path, cur_content = pom_path, content
+    for _ in range(max_depth):
+        chain.append(cur_content)
+        parent = _maven_parent_pom_path(cur_path, cur_content)
+        if not parent or parent in seen:
+            break
+        seen.add(parent)
+        try:
+            with open(parent, "r", encoding="utf-8", errors="replace") as fh:
+                cur_content = fh.read()
+        except OSError:
+            break
+        cur_path = parent
+
+    props: Dict[str, str] = {}
+    managed: Dict[str, str] = {}
+    # Walk parents first so that nearer definitions overwrite them.
+    for text in reversed(chain):
+        for k, v in MAVEN_PROPERTY.findall(text):
+            props[k] = v
+        for mgmt in _MAVEN_DEPMGMT_BLOCK.finditer(text):
+            for entry in _MAVEN_DEP_ENTRY.finditer(mgmt.group(1)):
+                block = entry.group(1)
+                g = _MAVEN_TAG_GROUP.search(block)
+                a = _MAVEN_TAG_ARTIFACT.search(block)
+                v = _MAVEN_TAG_VERSION.search(block)
+                if a and v:
+                    managed[a.group(1)] = v.group(1)
+                    if g:
+                        managed[f"{g.group(1)}:{a.group(1)}"] = v.group(1)
+    return props, managed
+
 GRADLE_DEP = re.compile(r"[\'\"]([\w.\-]+):([\w.\-]+):([\w.\-]+)[\'\"]")
 GRADLE_VERSION_BLOCK = re.compile(
     r"[\'\"]([\w.\-]+):([\w.\-]+)[\'\"]\)?\s*\{[^}]*?version\s*\{[^}]*?"
@@ -1176,6 +1278,12 @@ class Finding:
     is_test: bool = False
     fingerprint: str = ""
     fix: str = ""
+    flow: List[str] = field(default_factory=list)
+    # Surrounding source lines as (line_number, text) pairs, so a finding can
+    # be judged in context instead of from a single line torn out of it.
+    # Deliberately NOT part of the fingerprint: reformatting a neighbouring
+    # line must not invalidate an existing baseline or triage decision.
+    context: List[Tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -1361,6 +1469,96 @@ def bump(severity: str, steps: int) -> str:
     return SEVERITY_LIST[idx]
 
 
+CONTEXT_RADIUS = 3
+
+
+def context_lines(raw_lines: Sequence[str], line_no: int,
+                  radius: int = CONTEXT_RADIUS) -> List[Tuple[int, str]]:
+    """Returns (line_number, text) pairs around a 1-based line number.
+
+    A single matched line is often not enough to judge a finding - whether a
+    parser is hardened two lines further down, or what a concatenated SQL
+    string actually contains, only shows in context."""
+    if radius <= 0 or not raw_lines:
+        return []
+    start = max(1, line_no - radius)
+    end = min(len(raw_lines), line_no + radius)
+    return [(n, raw_lines[n - 1].rstrip("\n")) for n in range(start, end + 1)]
+
+
+def finding_context_text(f: Finding) -> str:
+    if not f.context:
+        return f.code
+    width = len(str(f.context[-1][0]))
+    return "\n".join(f"{'>' if n == f.line else ' '} {n:>{width}} | {line}"
+                     for n, line in f.context)
+
+
+def enrich_context(findings: List[Finding], root: str, radius: int = 3, raw_cache: Optional[Dict[str, List[str]]] = None) -> None:
+    """Load original source once per file, including dependency and OSV findings."""
+    cache: Dict[str, List[str]] = dict(raw_cache or {})
+    for f in findings:
+        path = os.path.join(root, f.file) if root else f.file
+        if path not in cache:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    cache[path] = fh.read().splitlines()
+            except OSError:
+                cache[path] = []
+        lines = cache[path]
+        if 1 <= f.line <= len(lines):
+            start, end = max(1, f.line - radius), min(len(lines), f.line + radius)
+            f.context = [(n, lines[n - 1]) for n in range(start, end + 1)]
+
+
+def load_codeql_sarif(paths: Sequence[str], root: str) -> List[Finding]:
+    """Import CodeQL CLI/Action SARIF without bundling CodeQL or its queries."""
+    imported: List[Finding] = []
+    for sarif_path in paths:
+        try:
+            with open(sarif_path, encoding="utf-8") as fh:
+                document = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"cannot read CodeQL SARIF {sarif_path}: {exc}") from exc
+        for run in document.get("runs", []):
+            driver = run.get("tool", {}).get("driver", {})
+            rule_names = {str(r.get("id")): r.get("name", "")
+                          for r in driver.get("rules", [])}
+            for result in run.get("results", []):
+                rid = str(result.get("ruleId") or result.get("rule", "CODEQL"))
+                location = (result.get("locations") or [{}])[0]
+                physical = location.get("physicalLocation") or {}
+                artifact = physical.get("artifactLocation") or {}
+                uri = urllib.parse.unquote(str(artifact.get("uri") or "<unknown>"))
+                if uri.startswith("file://"):
+                    uri = uri[7:]
+                if os.path.isabs(uri) and root:
+                    rel = os.path.relpath(uri, root)
+                else:
+                    rel = os.path.normpath(uri)
+                region = physical.get("region") or {}
+                line = int(region.get("startLine") or 1)
+                message = (result.get("message") or {}).get("text", "CodeQL finding")
+                severity = {"error": "HIGH", "warning": "MEDIUM", "note": "LOW"}.get(
+                    str(result.get("level") or "warning").lower(), "MEDIUM")
+                flow: List[str] = []
+                for code_flow in result.get("codeFlows", []):
+                    for thread in code_flow.get("threadFlows", []):
+                        for step in thread.get("locations", []):
+                            step_loc = step.get("location", {}).get("physicalLocation", {})
+                            step_uri = (step_loc.get("artifactLocation") or {}).get("uri", uri)
+                            step_line = (step_loc.get("region") or {}).get("startLine", "?")
+                            flow.append(f"{step_uri}:{step_line}")
+                code = str(region.get("snippet", {}).get("text") or message)
+                external_id = f"CODEQL-{rid}"
+                imported.append(Finding(
+                    file=rel, line=line, rule_id=external_id,
+                    rule_name=rule_names.get(rid) or rid, severity=severity,
+                    status="VULNERABLE", code=code[:200], note=message,
+                    fingerprint=fingerprint(rel, external_id, f"{line}:{code}"), flow=flow))
+    return imported
+
+
 def fingerprint(rel_path: str, rule_id: str, code: str) -> str:
     norm = re.sub(r"\s+", " ", code).strip()
     return hashlib.sha1(f"{rel_path}|{rule_id}|{norm}".encode("utf-8")).hexdigest()[:16]
@@ -1384,17 +1582,26 @@ def load_file(path: str) -> Optional[Tuple[str, List[str], List[str], List[Metho
 
 def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: List[Method],
                  helper_index: Dict[str, Set[str]], root: str,
-                 show_hardened: bool) -> List[Finding]:
-    code_text = "\n".join(lines)
-    file_taint = taint_hints(code_text)
+                 show_hardened: bool,
+                 active_rules: Optional[Sequence[Rule]] = None) -> List[Finding]:
     is_test = bool(TEST_PATH.search(path)) or path.endswith(("Test.java", "Tests.java", "IT.java"))
     rel = os.path.relpath(path, root) if root else path
 
     findings: List[Finding] = []
     for idx, line in enumerate(lines, start=1):
         raw_line = raw_lines[idx - 1] if idx - 1 < len(raw_lines) else ""
-        prev_raw = raw_lines[idx - 2] if idx >= 2 else ""
-        sup_match = SUPPRESS_MARKER.search(raw_line) or SUPPRESS_MARKER.search(prev_raw)
+        # Imports mention vulnerable APIs but do not execute them. Rules that
+        # intentionally inspect dependencies operate on build files instead.
+        if line.lstrip().startswith(("import ", "package ")):
+            continue
+        # A marker may sit immediately above a method declaration while the
+        # vulnerable API occurs a line or two into its body.  Inspect the
+        # short declaration window before falling back to rule evaluation.
+        sup_match = None
+        for candidate in reversed(raw_lines[max(0, idx - 3):idx]):
+            sup_match = SUPPRESS_MARKER.search(candidate)
+            if sup_match:
+                break
         suppressed_rules = None
         if sup_match:
             if sup_match.group(1):
@@ -1402,10 +1609,29 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
             else:
                 continue
 
-        for rule in RULES:
+        meth = enclosing_method(methods, idx)
+        method_marker_found = False
+        method_suppressed_rules: Optional[Set[str]] = set()
+        if meth:
+            # A marker immediately above a method applies to the method body,
+            # including intervening annotations and the declaration itself.
+            for candidate in raw_lines[max(0, meth.start - 4):meth.start]:
+                marker = SUPPRESS_MARKER.search(candidate)
+                if marker:
+                    method_marker_found = True
+                    method_suppressed_rules = ({r.strip().upper()
+                                                for r in marker.group(1).split(",") if r.strip()}
+                                               if marker.group(1) else None)
+
+        # Rule include/exclude filters are resolved once by the CLI. Avoid
+        # running regexes for disabled rules on every source line.
+        for rule in (active_rules if active_rules is not None else RULES):
             if not rule.pattern.search(line):
                 continue
             if suppressed_rules is not None and rule.rid.upper() in suppressed_rules:
+                continue
+            if method_marker_found and (method_suppressed_rules is None or
+                                        rule.rid.upper() in method_suppressed_rules):
                 continue
 
             var = None
@@ -1413,9 +1639,23 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
             if m:
                 var = m.group(1)
 
-            meth = enclosing_method(methods, idx)
             scope_lines = lines[meth.start - 1:meth.end] if meth else lines
-            guards = collect_guards(scope_lines, var) if var else set()
+            # Only use taint as a confidence/severity signal when it occurs in
+            # the same method as the sink. File-wide taint made unrelated
+            # class annotations and sibling methods look one level worse.
+            finding_taint = taint_hints("\n".join(scope_lines)) if meth else []
+            if var:
+                guards = collect_guards(scope_lines, var)
+            elif rule.rid.startswith("SpringSecurityCheck-"):
+                # Spring Security is configured as a builder chain
+                # (http.csrf(...).sessionManagement(...)), so the hardening
+                # calls are not bound to a variable the way a parser factory
+                # is. Restricting guard collection to a variable would leave
+                # guards permanently empty here and report every such rule
+                # even on correctly hardened configurations.
+                guards = collect_guards(scope_lines, None)
+            else:
+                guards = set()
 
             # Resolve a helper factory: dbf = XmlUtils.secureFactory();
             via_helper = None
@@ -1442,7 +1682,7 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
                 severity = bump(severity, -1)
             elif status == "HARDENED":
                 severity = "INFO"
-            if status in ("VULNERABLE", "REVIEW", "ANTIPATTERN") and file_taint and not is_test:
+            if status in ("VULNERABLE", "REVIEW", "ANTIPATTERN") and finding_taint and not is_test:
                 severity = bump(severity, 1)
             if is_test:
                 severity = bump(severity, -1)
@@ -1453,8 +1693,9 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
                 severity=severity, status=status, code=snippet, variable=var,
                 method=meth.name if meth else None,
                 guards_found=sorted(guards), guards_missing=missing,
-                taint=file_taint, note=note.strip(), is_test=is_test,
+                taint=finding_taint, note=note.strip(), is_test=is_test,
                 fingerprint=fingerprint(rel, rule.rid, snippet),
+                context=context_lines(raw_lines, idx),
             ))
     return findings
 
@@ -1507,11 +1748,11 @@ def analyze_build_file(path: str, root: str) -> List[Finding]:
                 return i
         return 1
 
-    # --- property expansion for Maven ------------------------------------
+    # --- property + dependencyManagement expansion for Maven --------------
     props: Dict[str, str] = {}
+    managed_deps: Dict[str, str] = {}
     if path.endswith(".xml"):
-        for k, v in MAVEN_PROPERTY.findall(content):
-            props[k] = v
+        props, managed_deps = maven_resolution_context(path, content)
 
     def resolve(ver: Optional[str]) -> Optional[str]:
         if not ver:
@@ -1528,6 +1769,17 @@ def analyze_build_file(path: str, root: str) -> List[Finding]:
         sb_ver = (m.group(1) or m.group(2) or "").strip()
 
     def managed_version(artifact: str) -> Optional[str]:
+        # 1) A real <dependencyManagement> entry from this pom or a local
+        #    parent pom - authoritative, so it wins.
+        mv = managed_deps.get(artifact)
+        if mv:
+            resolved = resolve(mv)
+            if resolved:
+                return resolved
+        # 2) Fall back to the small built-in table of Spring Boot managed
+        #    versions. This only covers a handful of artifacts and cannot be
+        #    kept complete by hand, so it is a last resort, not a source of
+        #    truth.
         if not sb_ver:
             return None
         for prefix in sorted(SPRING_BOOT_MANAGED.keys(), reverse=True):
@@ -1539,10 +1791,17 @@ def analyze_build_file(path: str, root: str) -> List[Finding]:
     pairs: List[Tuple[str, Optional[str]]] = []
 
     if path.endswith(".xml"):
-        for a, v in MAVEN_DEP.findall(content):
+        # <dependencyManagement> only pins versions for other modules - it is
+        # not a dependency of this module. Its entries are still used for
+        # version resolution above (managed_version), but must not be counted
+        # as dependencies here: otherwise a parent pom reports its managed
+        # versions AND every child reports the same artifact again, and the
+        # static rules would disagree with the OSV path on the same file.
+        dep_body = _MAVEN_DEPMGMT_BLOCK.sub("", content)
+        for a, v in MAVEN_DEP.findall(dep_body):
             pairs.append((a, resolve(v)))
         known = {a for a, _ in pairs}
-        for a in MAVEN_ARTIFACT_ONLY.findall(content):
+        for a in MAVEN_ARTIFACT_ONLY.findall(dep_body):
             if a not in known:
                 pairs.append((a, managed_version(a)))
 
@@ -1679,7 +1938,7 @@ def _osv_ecosystem_triples(path: str, content: str) -> List[Tuple[str, str, str]
     valid_version = lambda v: v and not re.search(r"\$\{|\+|latest|SNAPSHOT", v, re.I)  # noqa: E731
 
     if path.endswith(".xml"):
-        props: Dict[str, str] = dict(MAVEN_PROPERTY.findall(content))
+        props, managed = maven_resolution_context(path, content)
 
         def resolve(v: str) -> Optional[str]:
             m = MAVEN_PROPERTY_REF.match(v.strip())
@@ -1687,13 +1946,24 @@ def _osv_ecosystem_triples(path: str, content: str) -> List[Tuple[str, str, str]
                 return props.get(m.group(1))
             return v.strip() or None
 
-        for block_m in _MAVEN_DEPENDENCY_BLOCK_RE.finditer(content):
+        # Skip the <dependencyManagement> section itself: those entries declare
+        # versions for other modules, they are not dependencies of this module.
+        body = _MAVEN_DEPMGMT_BLOCK.sub("", content)
+        for block_m in _MAVEN_DEPENDENCY_BLOCK_RE.finditer(body):
             block = block_m.group(0)
             g, a, v = _MAVEN_GROUP_RE.search(block), _MAVEN_ARTIFACT_RE.search(block), _MAVEN_VERSION_RE.search(block)
-            if g and a and v:
+            if not (g and a):
+                continue
+            if v:
                 ver = resolve(v.group(1))
-                if valid_version(ver):
-                    triples.append((g.group(1), a.group(1), ver))
+            else:
+                # No <version> here - take it from dependencyManagement (this
+                # pom or a local parent). Previously such entries had no
+                # version and were dropped, i.e. never checked at all.
+                mv = managed.get(f"{g.group(1)}:{a.group(1)}") or managed.get(a.group(1))
+                ver = resolve(mv) if mv else None
+            if valid_version(ver):
+                triples.append((g.group(1), a.group(1), ver))
 
     elif path.endswith((".gradle", ".kts")):
         seen: Set[Tuple[str, str]] = set()
@@ -1731,6 +2001,231 @@ def _normalize_maven_version_for_osv(version: str) -> str:
     version is still used for the report and the cache key; only the string
     sent to OSV is normalized."""
     return _MAVEN_VERSION_QUALIFIER_RE.sub("", version)
+
+
+@dataclass(frozen=True)
+class ResolvedDependency:
+    build_file: str
+    group: str
+    artifact: str
+    version: str
+    resolver: str
+
+
+def parse_maven_dependency_output(output: str, build_file: str) -> List[ResolvedDependency]:
+    """Parse `maven-dependency-plugin:dependency:list` console coordinates."""
+    found: Set[Tuple[str, str, str]] = set()
+    for raw in output.splitlines():
+        line = re.sub(r"^\s*\[[A-Z]+\]\s*", "", raw).strip()
+        for token in line.split():
+            value = token.strip("(),")
+            parts = value.split(":")
+            if len(parts) not in (5, 6):
+                continue
+            group, artifact = parts[0], parts[1]
+            version, scope = parts[-2], parts[-1]
+            if (scope not in {"compile", "runtime", "provided", "system"}
+                    or not re.fullmatch(r"[\w.-]+", group)
+                    or not re.fullmatch(r"[\w.+-]+", version)):
+                continue
+            found.add((group, artifact, version))
+    return [ResolvedDependency(build_file, g, a, v, "maven")
+            for g, a, v in sorted(found)]
+
+
+def parse_gradle_dependency_output(output: str, build_file: str) -> List[ResolvedDependency]:
+    """Parse Gradle's plain `dependencies --configuration runtimeClasspath` tree."""
+    found: Set[Tuple[str, str, str]] = set()
+    coordinate = re.compile(
+        r"(?:^|\s)([\w.-]+):([\w.-]+):([^\s()]+)(?:\s+->\s+([^\s()]+))?")
+    for raw in output.splitlines():
+        match = coordinate.search(raw)
+        if not match or match.group(1) == "project":
+            continue
+        version = match.group(4) or match.group(3)
+        if version in {"FAILED", "unspecified"} or version.startswith("{"):
+            continue
+        found.add((match.group(1), match.group(2), version))
+    return [ResolvedDependency(build_file, g, a, v, "gradle")
+            for g, a, v in sorted(found)]
+
+
+def _wrapper_or_tool(module_dir: str, kind: str,
+                     boundary: Optional[str] = None) -> Optional[str]:
+    names = (("mvnw.cmd", "mvnw") if kind == "maven" else
+             ("gradlew.bat", "gradlew"))
+    current = os.path.abspath(module_dir)
+    stop = os.path.abspath(boundary) if boundary else current
+    while True:
+        for name in names:
+            candidate = os.path.join(current, name)
+            if os.path.isfile(candidate):
+                return candidate
+        parent = os.path.dirname(current)
+        if parent == current or current == stop:
+            break
+        current = parent
+    return shutil.which("mvn" if kind == "maven" else "gradle")
+
+
+def _executable_command(executable: str, args: Sequence[str]) -> List[str]:
+    if os.name == "nt" and executable.lower().endswith((".cmd", ".bat")):
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c",
+                subprocess.list2cmdline([executable] + list(args))]
+    if os.name != "nt" and not os.access(executable, os.X_OK):
+        return ["sh", executable] + list(args)
+    return [executable] + list(args)
+
+
+def resolve_project_dependencies(build_files: Sequence[str], root: str,
+                                 timeout: int = 180) -> Tuple[List[ResolvedDependency], List[str]]:
+    """Ask Maven/Gradle for the effective runtime graph.
+
+    This is deliberately opt-in: wrappers and build scripts are executable
+    project code and may access configured repositories. The normal static
+    scan never invokes them.
+    """
+    selected: Dict[str, Tuple[str, str]] = {}
+    for path in build_files:
+        name = os.path.basename(path)
+        module = os.path.abspath(os.path.dirname(path))
+        if name == "pom.xml":
+            selected[module] = (path, "maven")
+        elif name in {"build.gradle", "build.gradle.kts"} and module not in selected:
+            selected[module] = (path, "gradle")
+    dependencies: List[ResolvedDependency] = []
+    errors: List[str] = []
+    resolver_root = os.path.abspath(root) if root and os.path.isdir(root) else ""
+    for module, (build_file, kind) in sorted(selected.items()):
+        executable = _wrapper_or_tool(module, kind, resolver_root or module)
+        rel = os.path.relpath(build_file, root) if root else build_file
+        if not executable:
+            errors.append(f"{rel}: no {kind} wrapper or executable found")
+            continue
+        args = (["--batch-mode", "--no-transfer-progress", "dependency:list",
+                 "-DincludeScope=runtime", "-DexcludeTransitive=false"] if kind == "maven" else
+                ["dependencies", "--configuration", "runtimeClasspath", "--console=plain"])
+        try:
+            proc = subprocess.run(_executable_command(executable, args), cwd=module,
+                                  capture_output=True, text=True, errors="replace",
+                                  timeout=timeout, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"{rel}: {kind} resolver failed: {exc}")
+            continue
+        combined = proc.stdout + "\n" + proc.stderr
+        if proc.returncode != 0:
+            tail = " ".join(combined.splitlines()[-3:])[:500]
+            errors.append(f"{rel}: {kind} exited {proc.returncode}: {tail}")
+            continue
+        parsed = (parse_maven_dependency_output(combined, build_file) if kind == "maven"
+                  else parse_gradle_dependency_output(combined, build_file))
+        if not parsed:
+            errors.append(f"{rel}: {kind} returned no parseable runtime dependencies")
+            continue
+        dependencies.extend(parsed)
+    unique = {(d.build_file, d.group, d.artifact, d.version): d for d in dependencies}
+    return list(unique.values()), errors
+
+
+def analyze_resolved_dependencies(dependencies: Sequence[ResolvedDependency],
+                                  root: str) -> List[Finding]:
+    """Apply the built-in version rules to effective/transitive coordinates."""
+    out: List[Finding] = []
+    for item in dependencies:
+        for rule in DEP_RULES:
+            if item.artifact != rule.artifact or not rule.fixed or not is_older(item.version, rule.fixed):
+                continue
+            rel = os.path.relpath(item.build_file, root) if root else item.build_file
+            identity = f"{item.artifact}:{item.version}"
+            out.append(Finding(
+                file=rel, line=1, rule_id=f"DEP-{item.artifact.upper()}",
+                rule_name=f"Resolved dependency {item.artifact}",
+                severity=rule.severity, status="VULNERABLE", code=identity,
+                note=f"Effective {item.resolver} runtime graph resolves {item.group}:{identity}. "
+                     f"{rule.note} Fixed from {rule.fixed}.",
+                fix=f"Change dependency constraints so the effective version is {rule.fixed} or later.",
+                fingerprint=fingerprint(rel, f"DEP-{item.artifact.upper()}", identity)))
+    return out
+
+
+RESOLVED_COMBINATION_RULES = {
+    "BOOT-ACTUATOR-WITHOUT-HEALTH", "BOOT-ACTUATOR-WITHOUT-SECURITY",
+    "BOOT-DEVTOOLS-PRESENT", "BOOT-WEB-WITHOUT-SECURITY",
+    "COMBO-DATA-REST-WITHOUT-SECURITY",
+}
+
+
+def analyze_resolved_combinations(dependencies: Sequence[ResolvedDependency], root: str,
+                                  module_evidence: Dict[str, str]) -> List[Finding]:
+    """Evaluate Spring combinations against each effective runtime graph."""
+    grouped: Dict[str, List[ResolvedDependency]] = {}
+    for item in dependencies:
+        grouped.setdefault(os.path.abspath(item.build_file), []).append(item)
+    out: List[Finding] = []
+    for build_file, items in grouped.items():
+        by_artifact = {item.artifact: item for item in items}
+        artifacts = set(by_artifact)
+        security = bool(artifacts & {"spring-boot-starter-security",
+                                     "spring-security-web", "spring-security-config"})
+        evidence = module_evidence.get(build_file, "")
+        clean_source = _structure_mask(strip_comments(evidence))
+        rel = os.path.relpath(build_file, root) if root else build_file
+
+        def add(rid: str, item: ResolvedDependency, severity: str, note: str, fix: str) -> None:
+            identity = f"{item.group}:{item.artifact}:{item.version}"
+            out.append(Finding(
+                file=rel, line=1, rule_id=rid, rule_name=rid,
+                severity=severity, status="REVIEW", code=identity,
+                note="Effective runtime graph: " + note,
+                fix=fix, fingerprint=fingerprint(rel, rid, identity)))
+
+        actuator = (by_artifact.get("spring-boot-actuator-autoconfigure") or
+                    by_artifact.get("spring-boot-starter-actuator"))
+        auto = by_artifact.get("spring-boot-actuator-autoconfigure")
+        if auto and "spring-boot-health" not in artifacts:
+            match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.RELEASE)?", auto.version)
+            affected = bool(match and (4, 0, 0) <= tuple(map(int, match.groups())) <= (4, 0, 5))
+            if affected:
+                add("BOOT-ACTUATOR-WITHOUT-HEALTH", auto, "HIGH",
+                    "Spring Boot 4.0.0-4.0.5 actuator-autoconfigure without spring-boot-health. "
+                    "Servlet/default-chain prerequisites still require source/runtime review.",
+                    "Upgrade Spring Boot to 4.0.6 or later and verify the SecurityFilterChain.")
+        devtools = by_artifact.get("spring-boot-devtools")
+        if devtools:
+            add("BOOT-DEVTOOLS-PRESENT", devtools, "MEDIUM",
+                "DevTools is present in the resolved runtime graph.",
+                "Exclude DevTools from the production runtime/archive.")
+        if actuator and not security:
+            add("BOOT-ACTUATOR-WITHOUT-SECURITY", actuator, "MEDIUM",
+                "Actuator is present without Spring Security web/config in the resolved graph.",
+                "Authenticate management endpoints and restrict their exposure.")
+        data_rest = next((by_artifact[name] for name in
+                          ("spring-boot-starter-data-rest", "spring-data-rest-webmvc",
+                           "spring-data-rest-core") if name in by_artifact), None)
+        if data_rest and not security:
+            repository = bool(
+                re.search(r"@RepositoryRestResource\b(?!\s*\([^)]*\bexported\s*=\s*false)",
+                          clean_source, re.I)
+                or re.search(r"\b(?:extends|:)\s*(?:[\w.]+\.)?"
+                             r"(?:CrudRepository|JpaRepository|PagingAndSortingRepository|"
+                             r"Repository)\s*<", clean_source))
+            add("COMBO-DATA-REST-WITHOUT-SECURITY", data_rest,
+                "HIGH" if repository else "MEDIUM",
+                "Spring Data REST is present without Spring Security web/config. " +
+                ("An export-capable repository was recognized." if repository else
+                 "No export-capable repository was recognized."),
+                "Restrict repository export and authorize Data REST endpoints.")
+        web = next((by_artifact[name] for name in
+                    ("spring-boot-starter-web", "spring-boot-starter-webmvc",
+                     "spring-boot-starter-webflux", "spring-webmvc", "spring-webflux")
+                    if name in by_artifact), None)
+        if (web and not security and not actuator and not data_rest
+                and re.search(r"@(?:RestController|EnableWebSecurity)\b", clean_source)):
+            add("BOOT-WEB-WITHOUT-SECURITY", web, "MEDIUM",
+                "Web runtime plus controller/security annotation without Spring Security web/config. "
+                "Gateway or external authentication may still be intentional.",
+                "Verify the effective authentication and authorization design.")
+    return out
 
 
 def osv_query_online(group: str, artifact: str, version: str,
@@ -1879,7 +2374,8 @@ def _osv_severity(vuln: dict) -> str:
 def osv_check_build_files(build_files: List[str], root: str,
                           cache_read: Optional[Dict[str, dict]],
                           cache_write: Optional[Dict[str, dict]],
-                          jobs: int = 8) -> Tuple[List["Finding"], int, int, int, Optional[str]]:
+                          jobs: int = 8,
+                          resolved: Sequence[ResolvedDependency] = ()) -> Tuple[List["Finding"], int, int, int, Optional[str]]:
     """Runs the OSV check across the given build files.
 
     cache_read (if not None): look packages up ONLY here - no network call is
@@ -1902,14 +2398,23 @@ def osv_check_build_files(build_files: List[str], root: str,
     """
     # Pass 1: collect every (file, group, artifact, version) occurrence.
     occurrences: List[Tuple[str, str, str, str]] = []
+    build_contents: Dict[str, Tuple[str, List[str]]] = {}
+    resolved_files = {os.path.abspath(d.build_file) for d in resolved}
     for bf in build_files:
         try:
-            content = open(bf, "r", encoding="utf-8", errors="replace").read()
+            with open(bf, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
         except OSError:
             continue
         rel = os.path.relpath(bf, root) if root else bf
-        for group, artifact, version in _osv_ecosystem_triples(bf, content):
-            occurrences.append((rel, group, artifact, version))
+        build_contents[rel] = (content, content.splitlines())
+        if os.path.abspath(bf) not in resolved_files:
+            for group, artifact, version in _osv_ecosystem_triples(bf, content):
+                occurrences.append((rel, group, artifact, version))
+    for item in resolved:
+        rel = os.path.relpath(item.build_file, root) if root else item.build_file
+        occurrences.append((rel, item.group, item.artifact, item.version))
+    occurrences = list(dict.fromkeys(occurrences))
 
     # Pass 2: reduce to the unique packages that actually need a lookup.
     unique: Dict[str, Tuple[str, str, str]] = {}
@@ -1923,7 +2428,15 @@ def osv_check_build_files(build_files: List[str], root: str,
 
     if cache_read is not None:
         for key in unique:
-            results[key] = cache_read.get(key)
+            cached = cache_read.get(key)
+            if isinstance(cached, dict):
+                results[key] = cached
+            else:
+                results[key] = None
+                failed += 1
+                if first_error is None:
+                    reason = "missing from" if key not in cache_read else "invalid entry in"
+                    first_error = f"{key}: {reason} offline cache"
     else:
         def _fetch(item: Tuple[str, Tuple[str, str, str]]):
             key, (group, artifact, version) = item
@@ -1975,14 +2488,30 @@ def osv_check_build_files(build_files: List[str], root: str,
             seen_ids |= id_group
             summary = (v.get("summary") or (v.get("details") or "")[:200]).strip()
             snippet = f"{group}:{artifact}:{version}"
+            line_no = 1
+            code = snippet
+            content, raw_lines = build_contents.get(rel, ("", []))
+            if rel.endswith(".xml"):
+                block = _find_maven_dep_block(content, artifact)
+                if block:
+                    block_text, offset = block
+                    artifact_offset = block_text.find(artifact)
+                    position = offset + max(0, artifact_offset)
+                    line_no = content.count("\n", 0, position) + 1
+                    if 1 <= line_no <= len(raw_lines):
+                        code = raw_lines[line_no - 1].strip()
+            elif rel.endswith((".gradle", ".kts", ".toml")):
+                declaration = _find_gradle_dep_line(raw_lines, artifact, version)
+                if declaration:
+                    code, line_no = declaration
             aliases = [a for a in (v.get("aliases") or []) if a != vid]
             note = summary or f"See https://osv.dev/vulnerability/{vid}"
             if aliases:
                 note += f" (also known as {', '.join(aliases[:3])})"
             out.append(Finding(
-                file=rel, line=1, rule_id=f"OSV-{vid}",
+                file=rel, line=line_no, rule_id=f"OSV-{vid}",
                 rule_name=f"OSV advisory {vid} for {group}:{artifact}",
-                severity=_osv_severity(v), status="VULNERABLE", code=snippet,
+                severity=_osv_severity(v), status="VULNERABLE", code=code,
                 note=note,
                 fix=f"Check {vid} at https://osv.dev/vulnerability/{vid} for the fixed version(s).",
                 fingerprint=fingerprint(rel, f"OSV-{vid}", snippet)))
@@ -2016,6 +2545,7 @@ def analyze_props_file(path: str, root: str) -> List[Finding]:
                 file=rel, line=idx, rule_id=rid, rule_name=rid,
                 severity=severity, status="ANTIPATTERN", code=raw.strip()[:200],
                 note=note, fingerprint=fp, fix=fix,
+                context=context_lines([l.rstrip("\n") for l in lines], idx),
             ))
     return findings
 
@@ -2122,7 +2652,7 @@ def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bo
     print(f"JSpringGuard {VERSION} - {scanned} source file(s), {builds} build file(s), "
           f"{len(findings)} finding(s)\n")
     if not findings:
-        print("No open XML sinks found.")
+        print("No findings at the selected filters.")
         print(f"\nJSpringGuard v{VERSION} by {AUTHOR} - {REPO_URL}")
         return
 
@@ -2133,7 +2663,8 @@ def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bo
         if f.method:
             loc += f"  in {f.method}()"
         print(loc)
-        print(colorize(f"  > {f.code}", "DIM", use_color))
+        for row in finding_context_text(f).splitlines():
+            print(colorize("  " + row, "DIM", use_color))
         if f.variable:
             print(f"  Instance: {f.variable}")
         if f.guards_found:
@@ -2144,6 +2675,8 @@ def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bo
                 print(f"    - {GUARD_HINTS.get(g, g)}")
         if f.taint:
             print(f"  External input in file: {', '.join(f.taint)}")
+        if f.flow:
+            print(f"  Flow: {' -> '.join(f.flow)}")
         if f.is_test:
             print("  (test code)")
         if f.note:
@@ -2164,6 +2697,9 @@ def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bo
 
 
 HTML_CSS = """
+.context-hit{display:inline-block;min-width:100%;background:var(--warn-soft);font-weight:bold}
+.source-context{white-space:pre;overflow-x:auto}
+
 :root{
 color-scheme:dark;
 --bg:#0b0d11;--surface:#13161d;--surface-2:#1a1e27;--surface-3:#222734;
@@ -2631,7 +3167,8 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
         parts.append("<div id='noMatch' class='empty-note' style='display:none'>No findings match your filter.</div>")
 
     for f in sort_findings(findings):
-        search_blob = esc(" ".join([f.rule_id, f.rule_name, f.file, f.severity, f.status, f.note]).lower())
+        search_blob = esc(" ".join([f.rule_id, f.rule_name, f.file, f.severity,
+                                    f.status, f.note] + f.flow).lower())
         vuln_type = categorize_rule(f.rule_id)
         parts.append(f"<div class='card {f.severity}' data-search='{search_blob}' "
                      f"data-type='{esc(vuln_type)}'>")
@@ -2642,8 +3179,14 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
                      f"<span class='card-status'>({esc(f.status)})</span></div>")
         parts.append(f"<div class='loc'>{esc(f.file)}:{f.line}"
                      + (f" &middot; {esc(f.method)}()" if f.method else "") + "</div>")
-        if f.code:
-            parts.append(f"<pre>{esc(f.code)}</pre>")
+        if f.code or f.context:
+            rows = []
+            for n, line in f.context:
+                marker = ">" if n == f.line else " "
+                cls = " class='context-hit'" if n == f.line else ""
+                rows.append(f"<span{cls}>{esc(marker + ' ' + str(n) + ' | ' + line)}</span>")
+            rendered = "\n".join(rows) if rows else esc(f.code)
+            parts.append(f"<pre class='source-context'>{rendered}</pre>")
         if f.guards_found:
             parts.append(f"<div class='meta-line'><b>Set:</b> <code>{esc(', '.join(f.guards_found))}</code></div>")
         if f.guards_missing:
@@ -2651,6 +3194,8 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
                 f"<li>{esc(GUARD_HINTS.get(g, g))}</li>" for g in f.guards_missing) + "</ul>")
         if f.taint:
             parts.append(f"<div class='meta-line'>External input: {esc(', '.join(f.taint))}</div>")
+        if f.flow:
+            parts.append(f"<div class='meta-line'>Data flow: {esc(' -> '.join(f.flow))}</div>")
         if f.is_test:
             parts.append("<div class='meta-line'>Test code</div>")
         if f.note:
@@ -2704,7 +3249,7 @@ def to_markdown(findings: List[Finding], scanned: int, builds: int) -> str:
                 out.append(f"| {k} | {counts[k]} |")
         out.append("")
     if not findings:
-        out.append("No open XML sinks found.")
+        out.append("No findings at the selected filters.")
         out.append("")
         out.append(f"---\n*JSpringGuard v{VERSION} by [{AUTHOR}]({AUTHOR_URL}) - {REPO_URL}*")
         return "\n".join(out)
@@ -2728,9 +3273,14 @@ def to_markdown(findings: List[Finding], scanned: int, builds: int) -> str:
             out.append("- Missing: " + "; ".join(GUARD_HINTS.get(g, g) for g in f.guards_missing))
         if f.taint:
             out.append(f"- External input in file: {', '.join(f.taint)}")
+        if f.flow:
+            out.append(f"- Data flow: `{' -> '.join(f.flow)}`")
         if f.note:
             out.append(f"- Note: {f.note}")
         out.append(f"- Fingerprint: `{f.fingerprint}`")
+        source = finding_context_text(f)
+        fence = "`" * max(3, 1 + max((len(m.group()) for m in re.finditer(r"`+", source)), default=0))
+        out += ["", "Source context ( > marks the finding):", "", fence + "text", source, fence]
         rule = RULE_BY_ID.get(f.rule_id)
         fix_text = f.fix or (rule.fix if rule else "")
         if fix_text:
@@ -2751,17 +3301,24 @@ def to_sarif(findings: List[Finding]) -> dict:
             "name": f.rule_name,
             "shortDescription": {"text": f.rule_name},
             "fullDescription": {"text": f.note or f.rule_name},
+            "helpUri": rule_help_uri(f.rule_id),
+            "help": {"text": f.note or f.rule_name},
         })
         results.append({
             "ruleId": f.rule_id,
             "level": level_map.get(f.severity, "warning"),
             "partialFingerprints": {"xxeCheck/v1": f.fingerprint},
             "message": {"text": f"{f.status}: {f.rule_name}. "
-                                f"Missing: {', '.join(f.guards_missing) or '-'}"},
+                                f"Missing: {', '.join(f.guards_missing) or '-'}"
+                                + (f". Flow: {' -> '.join(f.flow)}" if f.flow else "")},
             "locations": [{
                 "physicalLocation": {
                     "artifactLocation": {"uri": f.file.replace(os.sep, "/")},
                     "region": {"startLine": f.line, "snippet": {"text": f.code}},
+                    **({"contextRegion": {
+                        "startLine": f.context[0][0], "endLine": f.context[-1][0],
+                        "snippet": {"text": "\n".join(row for _, row in f.context)}
+                    }} if f.context else {}),
                 }
             }],
         })
@@ -3144,42 +3701,88 @@ Also check error messages and logs - the entity content often ends up there too.
 
 def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
          show_hardened: bool, jobs: int, with_deps: bool,
-         paths: Optional[List[str]] = None) -> Tuple[List[Finding], int, int]:
+         paths: Optional[List[str]] = None, context_radius: int = 3,
+         build_inventory: Optional[List[str]] = None,
+         module_evidence: Optional[Dict[str, str]] = None,
+         active_rules: Optional[Sequence[Rule]] = None) -> Tuple[List[Finding], int, int]:
     targets = paths or [root]
-    src_files, build_files = walk(targets, exts, exclude, skip_tests, with_deps)
-
+    inventory, build_files = walk(targets, tuple(set(exts) | set(PROP_EXTS) |
+        {".html", ".htm", ".properties"}), exclude, skip_tests, True)
+    inventory = sorted(set(inventory))
+    build_files = sorted(set(build_files))
+    if build_inventory is not None:
+        build_inventory.extend(build_files)
+    src_files = [p for p in inventory if p.endswith(exts) and not p.endswith((".html", ".htm"))]
+    template_files = [p for p in inventory if p.endswith((".html", ".htm"))]
+    props_files = [p for p in inventory if p.endswith(PROP_EXTS) and
+        (p in targets or any(k in os.path.basename(p) for k in
+         ("application", "security", "bootstrap", "management", "actuator")))]
     loaded: Dict[str, Tuple[List[str], List[Method]]] = {}
     raw_map: Dict[str, List[str]] = {}
-
     def _load(p: str):
         return p, load_file(p)
-
     if jobs > 1 and len(src_files) > 4:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             results = list(pool.map(_load, src_files))
     else:
         results = [_load(p) for p in src_files]
-
     for p, data in results:
-        if not data:
-            continue
-        _, raw_lines, lines, methods = data
-        loaded[p] = (lines, methods)
-        raw_map[p] = raw_lines
-
+        if data:
+            _, raw_lines, lines, methods = data
+            loaded[p] = (lines, methods)
+            raw_map[p] = raw_lines
     helper_index = build_helper_index(loaded)
-
     findings: List[Finding] = []
     for p, (lines, methods) in loaded.items():
-        findings.extend(analyze_file(p, raw_map[p], lines, methods, helper_index,
-                                     root, show_hardened))
+        findings.extend(analyze_file(p, raw_map[p], lines, methods, helper_index, root,
+                                     show_hardened, active_rules))
+        if p.endswith((".java", ".kt")):
+            rel = os.path.relpath(p, root) if root else p
+            text = "\n".join(lines)
+            extra = []
+            for analyzer in (analyze_spel_from_request, analyze_ldap_injection,
+                             analyze_log_injection, analyze_sqli_var_concat,
+                             analyze_web_source, analyze_structured_dataflow):
+                extra.extend(analyzer(rel, text))
+            findings.extend(f for f in extra if not finding_suppressed(raw_map[p], f))
+    for p in template_files:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                raw_map[p] = fh.read().splitlines()
+        except OSError:
+            continue
+        rel = os.path.relpath(p, root) if root else p
+        findings.extend(f for f in analyze_template(rel, "\n".join(raw_map[p]))
+                        if not finding_suppressed(raw_map[p], f))
     if with_deps:
+        # The nearest inventoried POM owns a source file; sibling modules cannot
+        # accidentally satisfy a combination's source/security prerequisite.
+        pom_dirs = {os.path.abspath(os.path.dirname(b)) for b in build_files if os.path.basename(b) == "pom.xml"}
+        module_sources: Dict[str, List[str]] = {}
+        for p, (lines, _) in loaded.items():
+            if TEST_PATH.search(p):
+                continue
+            parent = os.path.abspath(os.path.dirname(p))
+            while parent not in pom_dirs and os.path.dirname(parent) != parent:
+                parent = os.path.dirname(parent)
+            if parent in pom_dirs:
+                module_sources.setdefault(parent, []).append("\n".join(lines))
         for b in build_files:
             findings.extend(analyze_build_file(b, root))
-    # scan properties files
-    for pf in walk_props(targets, exclude):
+            findings.extend(analyze_build_hygiene(b, root))
+            module = os.path.abspath(os.path.dirname(b))
+            evidence = "\n".join(module_sources.get(module, []))
+            if module_evidence is not None:
+                module_evidence[os.path.abspath(b)] = evidence
+            findings.extend(analyze_boot_combinations(b, root, evidence))
+        for p in inventory:
+            if os.path.basename(p) == "gradle-wrapper.properties":
+                findings.extend(analyze_build_hygiene(p, root))
+    for pf in props_files:
         findings.extend(analyze_props_file(pf, root))
-    return findings, len(src_files), len(build_files)
+    findings = dedupe_findings(findings)
+    enrich_context(findings, root, context_radius, raw_map)
+    return findings, len(src_files) + len(template_files), len(build_files) if with_deps else 0
 
 
 # --------------------------------------------------------------------------
@@ -3231,6 +3834,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--skip-tests", action="store_true", help="Skip test directories")
     ap.add_argument("--show-hardened", action="store_true", help="Also list hardened locations")
     ap.add_argument("--no-deps", action="store_true", help="Skip the dependency check")
+    ap.add_argument("--resolve-deps", action="store_true",
+                    help="Opt in to Maven/Gradle runtime dependency resolution; executes the project wrapper/build")
+    ap.add_argument("--resolver-timeout", type=int, default=180, metavar="SECONDS",
+                    help="Timeout per Maven/Gradle module for --resolve-deps (default 180)")
     ap.add_argument("--check-osv", action="store_true",
                     help="Check dependencies against osv.dev, live. Always writes a local "
                          "cache file afterwards (see --osv-cache-write) for later offline reuse.")
@@ -3241,6 +3848,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Read a previously saved OSV cache FILE and report from it directly - "
                          "no network call at all, no need to also pass --check-osv (for "
                          "air-gapped machines)")
+    ap.add_argument("--codeql-sarif", action="append", metavar="FILE",
+                    help="Import CodeQL CLI/Action SARIF findings into this report; repeatable")
     ap.add_argument("--min-severity", default="LOW", choices=SEVERITY_LIST)
     ap.add_argument("--fail-on", default="MEDIUM", choices=SEVERITY_LIST + ["NONE"])
     ap.add_argument("--format", default="text", choices=["text", "json", "sarif", "markdown", "html"])
@@ -3250,8 +3859,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--baseline", help="JSON baseline: fingerprints it contains are hidden")
     ap.add_argument("--write-baseline", metavar="PATH", help="Save current findings as a baseline")
     ap.add_argument("--show-fix", action="store_true", help="Also print a fix snippet per finding")
+    ap.add_argument("--context", type=int, default=3, metavar="N",
+                    help="Source lines before and after findings (default 3; 0: matched line only)")
     ap.add_argument("--jobs", type=int, default=4, help="Parallel readers (default 4)")
     ap.add_argument("--no-color", action="store_true")
+    ap.add_argument("--list-rules", action="store_true", help="List all rule IDs, base severities and descriptions; no scan required")
+    ap.add_argument("--include-rule", "--enable-rule", action="append", default=[], metavar="GLOB",
+                    help="Only report matching rule IDs; repeat or comma-separate (e.g. 'SRC-XSS-*,OSV-*')")
+    ap.add_argument("--exclude-rule", "--disable-rule", action="append", default=[], metavar="GLOB",
+                    help="Suppress matching rule IDs; repeat or comma-separate; exclusion wins")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--fix", nargs="*", metavar="RULE",
                     help="Print hardened code templates (e.g. --fix DOM STAX)")
@@ -3259,14 +3875,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--version", action="version",
                     version=f"JSpringGuard {VERSION} by {AUTHOR} - {REPO_URL}")
     args = ap.parse_args(argv)
+    if args.context < 0:
+        ap.error("--context must be non-negative")
+    if args.resolver_timeout < 1:
+        ap.error("--resolver-timeout must be positive")
+    if args.resolve_deps and args.no_deps:
+        ap.error("--resolve-deps cannot be combined with --no-deps")
 
     print(f"JSpringGuard v{VERSION} by {AUTHOR} - {REPO_URL}", file=sys.stderr)
+    include_rules = parse_rule_patterns(args.include_rule)
+    exclude_rules = parse_rule_patterns(args.exclude_rule)
+    active_rules = [r for r in RULES if rule_selected(r.rid, include_rules, exclude_rules)]
 
     if (args.osv_cache_read or args.osv_cache_write) and not args.check_osv:
         print("[osv] --osv-cache-read/--osv-cache-write given without --check-osv - "
              "enabling --check-osv automatically (it would otherwise be silently ignored).",
              file=sys.stderr)
         args.check_osv = True
+
+    if args.list_rules:
+        for rid, (severity, description) in sorted(rule_catalog().items()):
+            if rule_selected(rid, include_rules, exclude_rules):
+                print(f"{rid}\t{severity}\t{description}")
+        return 0
 
     if args.poc:
         print(POC_TEXT)
@@ -3283,8 +3914,53 @@ def main(argv: Optional[List[str]] = None) -> int:
     exclude = set(DEFAULT_EXCLUDE_DIRS) | {x.strip() for x in args.exclude.split(",") if x.strip()}
     root = args.paths[0] if len(args.paths) == 1 and os.path.isdir(args.paths[0]) else ""
 
+    osv_build_files: List[str] = []
+    osv_incomplete = False
+    resolver_incomplete = False
+    resolved_dependencies: List[ResolvedDependency] = []
+    module_evidence: Dict[str, str] = {}
     findings, n_src, n_build = scan(root, exts, exclude, args.skip_tests, args.show_hardened,
-                                    max(1, args.jobs), not args.no_deps, paths=args.paths)
+                                    max(1, args.jobs), not args.no_deps, paths=args.paths,
+                                    context_radius=args.context, build_inventory=osv_build_files,
+                                    module_evidence=module_evidence,
+                                    active_rules=active_rules)
+
+    if args.codeql_sarif:
+        try:
+            codeql_findings = load_codeql_sarif(args.codeql_sarif, root)
+            enrich_context(codeql_findings, root, args.context)
+            findings.extend(codeql_findings)
+            print(f"[codeql] Imported {len(codeql_findings)} SARIF finding(s).", file=sys.stderr)
+        except ValueError as exc:
+            print(f"[codeql] {exc}", file=sys.stderr)
+            return 2
+
+    if args.resolve_deps:
+        print("[resolver] Executing project Maven/Gradle dependency resolution (explicitly enabled).",
+              file=sys.stderr)
+        resolved_dependencies, resolver_errors = resolve_project_dependencies(
+            osv_build_files, root, args.resolver_timeout)
+        if not osv_build_files:
+            resolver_errors.append("no Maven or Gradle build files found")
+        resolver_incomplete = bool(resolver_errors)
+        successful_files = {os.path.abspath(d.build_file) for d in resolved_dependencies}
+        successful_rel = {os.path.relpath(path, root) if root else path
+                          for path in successful_files}
+        # Effective versions supersede declaration-only DEP findings for modules
+        # whose resolver completed. Combination and build-hygiene rules remain.
+        findings = [f for f in findings
+                    if not ((f.rule_id.startswith("DEP-") or
+                             f.rule_id in RESOLVED_COMBINATION_RULES)
+                            and f.file in successful_rel)]
+        resolved_findings = analyze_resolved_dependencies(resolved_dependencies, root)
+        resolved_findings.extend(analyze_resolved_combinations(
+            resolved_dependencies, root, module_evidence))
+        enrich_context(resolved_findings, root, args.context)
+        findings.extend(resolved_findings)
+        print(f"[resolver] Resolved {len(resolved_dependencies)} unique runtime coordinates "
+              f"across {len(successful_files)} module(s).", file=sys.stderr)
+        for error in resolver_errors:
+            print(f"[resolver] WARNING: {error}", file=sys.stderr)
 
     if args.check_osv:
         cache_read: Optional[Dict[str, dict]] = None
@@ -3295,6 +3971,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             try:
                 with open(args.osv_cache_read, "r", encoding="utf-8") as fh:
                     cache_read = json.load(fh)
+                if not isinstance(cache_read, dict):
+                    raise ValueError("cache root must be a JSON object")
                 print(f"[osv] Using local cache only, no network call: {args.osv_cache_read} "
                      f"({len(cache_read)} package(s))", file=sys.stderr)
             except (OSError, ValueError) as exc:
@@ -3314,9 +3992,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         cache_write.update(json.load(fh))
                 except (OSError, ValueError):
                     pass
-        _, osv_build_files = walk(args.paths, exts, exclude, args.skip_tests, True)
         osv_findings, osv_occurrences, osv_unique, osv_failed, osv_first_error = osv_check_build_files(
-            osv_build_files, root, cache_read, cache_write, jobs=max(1, args.jobs))
+            osv_build_files, root, cache_read, cache_write, jobs=max(1, args.jobs),
+            resolved=resolved_dependencies)
+        osv_incomplete = osv_failed > 0
+        enrich_context(osv_findings, root, args.context)
         findings.extend(osv_findings)
         dedupe_note = (f" ({osv_occurrences} occurrence(s) across build files)"
                       if osv_occurrences != osv_unique else "")
@@ -3327,12 +4007,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                  f"failed - the {len(osv_findings)} figure above is INCOMPLETE, not a clean scan. "
                  f"First error: {osv_first_error}", file=sys.stderr)
             if osv_failed == osv_unique:
-                print("[osv] Every single query failed - this points to no real internet access, "
-                     "a proxy/firewall blocking api.osv.dev, or an SSL/certificate problem, not "
-                     "\"no vulnerabilities found\". Check connectivity, e.g.:\n"
-                     "        curl -s https://api.osv.dev/v1/query -d '{\"version\":\"2.9.1\","
-                     "\"package\":{\"name\":\"org.apache.logging.log4j:log4j-core\","
-                     "\"ecosystem\":\"Maven\"}}'", file=sys.stderr)
+                if cache_read is not None:
+                    print("[osv] The offline cache covers none of the resolved packages; "
+                          "refresh or replace it before treating this scan as clean.", file=sys.stderr)
+                else:
+                    print("[osv] Every single query failed - this points to no real internet access, "
+                         "a proxy/firewall blocking api.osv.dev, or an SSL/certificate problem, not "
+                         "\"no vulnerabilities found\". Check connectivity, e.g.:\n"
+                         "        curl -s https://api.osv.dev/v1/query -d '{\"version\":\"2.9.1\","
+                         "\"package\":{\"name\":\"org.apache.logging.log4j:log4j-core\","
+                         "\"ecosystem\":\"Maven\"}}'", file=sys.stderr)
         if cache_write is not None:
             try:
                 with open(args.osv_cache_write, "w", encoding="utf-8") as fh:
@@ -3355,10 +4039,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         except OSError as exc:
             print(f"[!] Baseline unreadable: {exc}", file=sys.stderr)
 
+    findings = [f for f in findings
+                if rule_selected(f.rule_id, include_rules, exclude_rules)]
     threshold = SEVERITY_ORDER[args.min_severity]
     findings = [f for f in findings
                 if SEVERITY_ORDER[f.severity] >= threshold
                 or (args.show_hardened and f.status == "HARDENED")]
+
 
     if args.write_baseline:
         payload = {"tool": "JSpringGuard", "version": VERSION,
@@ -3404,6 +4091,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Report written: {abs_path}", file=sys.stderr)
         print(f"Open it: file://{abs_path}", file=sys.stderr)
 
+    if osv_incomplete or resolver_incomplete:
+        return 2
     if args.fail_on == "NONE":
         return 0
     limit = SEVERITY_ORDER[args.fail_on]
@@ -3562,6 +4251,126 @@ MERGE_SRC_RULES: List[Rule] = [
               "influenced, this enables open redirect (phishing via a trusted domain).",
          fix="Validate the target against an allowlist of paths/hosts, or only allow "
              "relative paths within the application."),
+    Rule("SRC-XPATH-INJECTION", "Dynamic XPath expression",
+         re.compile(r"(?:XPath|xpath)\s*\.\s*(?:evaluate|compile)\s*\(\s*(?![\"'])", re.I),
+         "HIGH", [], [], always_report=True, kind="sink",
+         note="An XPath expression is built from a non-literal value and may be injectable.",
+         fix="Use a fixed XPath or bind values with XPath variables; validate input before evaluation."),
+    Rule("SRC-REGEX-INJECTION", "Dynamic regular expression (ReDoS risk)",
+         re.compile(r"(?:Pattern\s*\.\s*compile|\.(?:matches|replaceAll|replaceFirst|split))\s*\(\s*(?![\"'])", re.I),
+         "HIGH", [], [], always_report=True, kind="sink",
+         note="Attacker-controlled regular expressions can cause catastrophic backtracking.",
+         fix="Use a strict allowlist/length limit and a safe regex engine or timeout."),
+    Rule("SRC-REFLECTION-INJECTION", "Reflection with dynamic class or member name",
+         re.compile(r"(?:Class\s*\.\s*forName|\.getDeclaredMethod|\.getMethod|\.invoke|"
+                    r"Constructor\s*\.\s*newInstance)\s*\(\s*(?![\"'])", re.I),
+         "HIGH", [], [], always_report=True, kind="sink",
+         note="Dynamic reflection can turn untrusted input into arbitrary code or class access.",
+         fix="Use an explicit class/member allowlist and avoid reflection on request data."),
+    Rule("SRC-MASS-ASSIGNMENT", "Unrestricted Spring data binding",
+         re.compile(r"@ModelAttribute\s+(?:[\w.$<>?]+\s+)?\w+|\bWebDataBinder\b", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="Automatic binding may let callers set security-sensitive fields such as role/admin.",
+         fix="Bind into a narrow DTO and configure setAllowedFields/setDisallowedFields explicitly."),
+    Rule("SRC-DECOMPRESSION-BOMB", "Unbounded decompression or archive extraction",
+         re.compile(r"\bnew\s+(?:ZipInputStream|GZIPInputStream|InflaterInputStream|"
+                    r"TarArchiveInputStream)\s*\(", re.I),
+         "HIGH", [], [], always_report=True, kind="sink",
+         note="Compressed attacker input is processed without a visible size/entry limit.",
+         fix="Enforce compressed and expanded byte limits, entry-count limits, and safe paths."),
+    Rule("SRC-IDOR", "Object endpoint with identifier but no visible ownership check",
+         re.compile(r"@(Get|Put|Patch|Delete)Mapping\s*\([^)]*\{(?:id|userId|accountId|orderId)\b", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="An identifier-based endpoint needs an explicit object-level authorization check.",
+         fix="Check ownership/tenant scope in the service and enforce it with method security."),
+    Rule("SRC-CRYPTO-WEAK-CIPHER", "Weak cipher or ECB mode",
+         re.compile(r"Cipher\s*\.\s*getInstance\s*\(\s*[\"'](?:DES|3DES|DESede|RC4|RC2|.*?/ECB(?:/[^\"']*)?)[\"']", re.I),
+         "HIGH", [], [], kind="antipattern",
+         note="DES/RC4 or ECB mode provides insufficient confidentiality.",
+         fix="Use an authenticated mode such as AES/GCM with a unique nonce."),
+    Rule("SRC-CRYPTO-WEAK-KEY", "Weak asymmetric key size",
+         re.compile(r"(?:KeyPairGenerator|RSA|DSA)[^;\n]{0,100}\b(?:initialize|init)\s*\(\s*(?:512|768|1024)\b", re.I),
+         "HIGH", [], [], kind="antipattern",
+         note="The configured key size is below modern security recommendations.",
+         fix="Use at least RSA-2048/3072 or an approved modern curve."),
+    Rule("SRC-RESOURCE-EXHAUSTION", "Unbounded request, file, or response size",
+         re.compile(r"\bMultipartFile\b|Files\s*\.\s*readAllBytes\s*\(|InputStream\s*\.\s*readAllBytes\s*\(", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="The operation can consume attacker-controlled memory or disk without a visible limit.",
+         fix="Set multipart, request, decompressed, and response size limits and stream large data."),
+    Rule("SRC-LOG-SENSITIVE", "Sensitive value written to application logs",
+         re.compile(r"\b(?:log|logger)\s*\.\s*(?:trace|debug|info|warn|error)\s*\([^\n]{0,180}\b(?:password|passwd|secret|token|authorization|cookie)\b", re.I),
+         "HIGH", [], [], always_report=True, kind="sink",
+         note="Tokens, credentials, or session material must not be written to logs.",
+         fix="Remove the value from logs or redact it before logging."),
+    Rule("SRC-SENSITIVE-URL", "Sensitive value placed in a URL or query string",
+         re.compile(r"(?:sendRedirect|URI\s*\.\s*create|new\s+URL|queryParam)\s*\([^\n]{0,180}\b(?:password|passwd|secret|token|session|authorization)\b", re.I),
+         "HIGH", [], [], always_report=True, kind="sink",
+         note="Secrets in URLs leak through browser history, proxies, referrers, and access logs.",
+         fix="Send secrets in protected headers or request bodies and rotate exposed values."),
+    Rule("SRC-HOSTNAME-VERIFIER", "Custom hostname verifier may accept any host",
+         re.compile(r"setHostnameVerifier\s*\(\s*(?:\([^)]*\)\s*[-=]>\s*true|new\s+HostnameVerifier)", re.I),
+         "HIGH", [], [], always_report=True, kind="antipattern",
+         note="A permissive custom hostname verifier defeats TLS endpoint identity checks.",
+         fix="Use the platform default hostname verifier and certificate validation."),
+    Rule("SRC-TIMING-SECRET-COMPARE", "Secret compared with ordinary equals",
+         re.compile(r"\b(?:password|passwd|secret|token|signature|hmac)\b[^\n]{0,40}\.equals\s*\(", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="Ordinary string comparison can leak information through timing differences.",
+         fix="Use a constant-time comparison such as MessageDigest.isEqual for secret bytes."),
+    Rule("SRC-DIRECTORY-LISTING", "Directory contents enumerated for a response",
+         re.compile(r"(?:Files\s*\.\s*list|Files\s*\.\s*walk|DirectoryStream\s*<|new\s+DirectoryStream)", re.I),
+         "LOW", [], [], always_report=True, kind="sink",
+         note="Returning filesystem directory contents can disclose files and metadata.",
+         fix="Do not expose directory enumeration; use an allowlisted resource index."),
+    Rule("SRC-EXCEPTION-SWALLOW", "Broad exception swallowed",
+         re.compile(r"catch\s*\(\s*(?:Exception|Throwable|RuntimeException)\b[^)]*\)\s*\{\s*\}", re.I | re.S),
+         "MEDIUM", [], [], always_report=True, kind="antipattern",
+         note="Swallowing broad exceptions hides security failures and can leave unsafe state active.",
+         fix="Handle the specific exception, fail closed, and log without sensitive data."),
+    # Reactive Spring Security uses a separate DSL and filter chain.  These
+    # patterns intentionally stay scoped to the reactive API names so the
+    # servlet rules above do not produce duplicate findings.
+    Rule("WEBFLUX-PERMITALL", "WebFlux anyExchange().permitAll()",
+         re.compile(r"authorizeExchange\s*\([^)]{0,300}?anyExchange\s*\(\s*\)\s*\.\s*permitAll\s*\(\s*\)", re.I | re.S),
+         "CRITICAL", [], [], always_report=True, kind="antipattern",
+         note="The reactive catch-all route is publicly reachable.",
+         fix="Require authentication for the catch-all and permit only explicit public endpoints."),
+    Rule("WEBFLUX-CSRF-DISABLED", "WebFlux CSRF protection disabled",
+         re.compile(r"\.csrf\s*\(\s*(?:ServerHttpSecurity\.CsrfSpec\s*::\s*disable|\w+\s*->\s*\w+\s*\.\s*disable\s*\(\s*\))", re.I),
+         "HIGH", [], [], always_report=True, kind="antipattern",
+         note="Reactive CSRF protection is disabled; this is safe only for a documented stateless API.",
+         fix="Keep CSRF enabled for browser sessions, or document and enforce a stateless token-only API."),
+    Rule("WEBFLUX-FN-SENSITIVE-ROUTE", "Sensitive functional WebFlux route",
+         re.compile(r"(?:RouterFunctions\s*\.\s*)?route\s*\([^\n]{0,180}?GET\s*\(\s*[\"']/(?:admin|api|actuator|internal)\b", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="Functional WebFlux routes bypass controller-specific heuristics; verify that this sensitive route is protected by the reactive filter chain.",
+         fix="Require authentication/authorization for the route and test it through the WebFlux security chain."),
+    Rule("RSOCKET-PERMITALL", "RSocket payload authorization permits all",
+         re.compile(r"(?:authorizePayload|RSocketSecurity)[\s\S]{0,300}?(?:anyExchange|anyRequest)\s*\(\s*\)\s*\.\s*permitAll\s*\(\s*\)", re.I),
+         "CRITICAL", [], [], always_report=True, kind="antipattern",
+         note="All RSocket payloads are accepted without authorization.",
+         fix="Authorize routes explicitly with authorizePayload and require authentication by default."),
+    Rule("RSOCKET-NO-PAYLOAD-AUTH", "RSocket security without visible payload authorization",
+         re.compile(r"@EnableRSocketSecurity\b", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="RSocket security is enabled; verify that a PayloadSocketAcceptorInterceptor or authorizePayload policy is configured.",
+         fix="Define explicit payload authorization and authentication metadata, then deny unmatched routes."),
+    Rule("OAUTH2-REACTIVE-NO-ISSUER", "Reactive JWT decoder without issuer binding",
+         re.compile(r"NimbusReactiveJwtDecoder\s*\.\s*withJwkSetUri\s*\(", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="A remote JWK set alone does not bind tokens to the expected issuer.",
+         fix="Prefer JwtDecoders.fromIssuerLocation or validate issuer explicitly alongside the JWK source."),
+    Rule("OAUTH2-REACTIVE-JWK-REMOTE", "Reactive JWT decoder trusts a remote JWK URL",
+         re.compile(r"NimbusReactiveJwtDecoder\s*\.\s*withJwkSetUri\s*\(\s*[\"']http://", re.I),
+         "HIGH", [], [], always_report=True, kind="antipattern",
+         note="JWK material is fetched over plaintext HTTP and can be replaced in transit.",
+         fix="Use HTTPS with certificate validation and bind the issuer/audience explicitly."),
+    Rule("X509-AUTH-CONFIG-REVIEW", "X.509 authentication configuration requires review",
+         re.compile(r"\.x509\s*\(\s*(?:Customizer\.withDefaults\s*\(\s*\)|\w+\s*->)", re.I),
+         "MEDIUM", [], [], always_report=True, kind="sink",
+         note="Verify that client certificates are required, mapped to the intended principal, and backed by a trusted CA.",
+         fix="Require client certificates at the TLS layer, use a restricted trust store, and configure an explicit subject principal mapping."),
 ]
 
 # --- 4) extra config rules (properties/YAML) ------------------------------
@@ -3654,6 +4463,125 @@ BUILD_HYGIENE_RULES: List[Tuple[str, "re.Pattern", str, str, str, str]] = [
 ]
 
 
+def analyze_boot_combinations(path: str, root: str, source_text: str = "") -> List[Finding]:
+    """Direct Maven dependencies only; absence is REVIEW, never proof of exposure.
+
+    Independently implemented from the Spring advisory, inspired by BootShield's
+    dependency-combination checks. No project code or Maven plugins are executed.
+    """
+    if os.path.basename(path) != "pom.xml":
+        return []
+    from xml.parsers import expat
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError:
+        return []
+    parser = expat.ParserCreate(namespace_separator="}")
+    stack: List[str] = []
+    deps: List[dict] = []
+    current: dict = {}
+    def start(name, attrs):
+        nonlocal current
+        stack.append(name.split("}")[-1])
+        if stack == ["project", "dependencies", "dependency"]:
+            current = {"line": parser.CurrentLineNumber}
+        if len(stack) == 4 and stack[:3] == ["project", "dependencies", "dependency"]:
+            current[stack[-1]] = ""
+            if stack[-1] == "artifactId":
+                current["line"] = parser.CurrentLineNumber
+    def chars(data):
+        if len(stack) == 4 and stack[:3] == ["project", "dependencies", "dependency"]:
+            current[stack[-1]] = current.get(stack[-1], "") + data
+    def end(name):
+        if stack == ["project", "dependencies", "dependency"]:
+            deps.append({k: v.strip() if isinstance(v, str) else v for k, v in current.items()})
+        stack.pop()
+    def reject_doctype(*args):
+        raise ValueError("DTD not supported")
+    parser.StartElementHandler, parser.EndElementHandler = start, end
+    parser.CharacterDataHandler = chars
+    parser.StartDoctypeDeclHandler = reject_doctype
+    try:
+        parser.Parse(content, True)
+    except (expat.ExpatError, ValueError):
+        return []
+    deps = [d for d in deps if d.get("scope", "compile") != "test"]
+    boot = {d.get("artifactId"): d for d in deps if d.get("groupId") == "org.springframework.boot"}
+    security = ("spring-boot-starter-security" in boot or any(
+        d.get("groupId") == "org.springframework.security" and
+        d.get("artifactId") in {"spring-security-web", "spring-security-config"} for d in deps))
+    rel = os.path.relpath(path, root) if root else path
+    lines = content.splitlines()
+    findings: List[Finding] = []
+    def add(rid, dep, severity, note, fix):
+        line = dep["line"]
+        code = lines[line - 1].strip()
+        if SUPPRESS_MARKER.search(lines[line - 1]):
+            return
+        findings.append(Finding(file=rel, line=line, rule_id=rid, rule_name=rid,
+            severity=severity, status="REVIEW", code=code, note=note, fix=fix,
+            fingerprint=fingerprint(rel, rid, code), context=context_lines(lines, line)))
+    actuator = boot.get("spring-boot-actuator-autoconfigure")
+    if actuator and "spring-boot-health" not in boot:
+        props, managed = maven_resolution_context(path, content)
+        version = actuator.get("version") or managed.get("org.springframework.boot:spring-boot-actuator-autoconfigure", "")
+        for _ in range(8):
+            resolved = re.sub(r"\$\{([^}]+)\}", lambda m: props.get(m.group(1), m.group()), version)
+            if resolved == version:
+                break
+            version = resolved
+        exact = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.RELEASE)?", version)
+        affected = bool(exact and (4, 0, 0) <= tuple(map(int, exact.groups())) <= (4, 0, 5))
+        if affected or not exact:
+            add("BOOT-ACTUATOR-WITHOUT-HEALTH", actuator, "HIGH" if affected else "MEDIUM",
+                "Potential CVE-2026-40976 dependency combination; version: " + (version or "unresolved") +
+                ". Affected: 4.0.0-4.0.5. Requires a servlet application relying on the default security chain "
+                "and no spring-boot-health at runtime. Transitive dependencies, active profiles and custom "
+                "security configuration are not resolved; verify all prerequisites. "
+                "https://spring.io/security/cve-2026-40976/",
+                "For affected versions upgrade Spring Boot to 4.0.6 or later; inspect the effective dependency tree and SecurityFilterChain.")
+    devtools = boot.get("spring-boot-devtools")
+    if devtools:
+        add("BOOT-DEVTOOLS-PRESENT", devtools, "LOW" if devtools.get("optional") == "true" else "MEDIUM",
+            "DevTools is directly declared. This does not prove production inclusion or remote restart exposure; "
+            "optional only controls downstream dependency propagation.",
+            "Verify DevTools is excluded from the production archive and remote restart is disabled.")
+    actuator = actuator or boot.get("spring-boot-starter-actuator")
+    if actuator and not security:
+        add("BOOT-ACTUATOR-WITHOUT-SECURITY", actuator, "MEDIUM",
+            "Actuator declared without a direct Spring Security web/config dependency. Authentication may be "
+            "provided transitively or externally; endpoint exposure is not established by this POM.",
+            "Inspect effective runtime dependencies, authenticate management endpoints and limit exposure.")
+    data_rest = next((d for d in deps if
+        (d.get("groupId") == "org.springframework.data" and d.get("artifactId") in
+         {"spring-data-rest-core", "spring-data-rest-webmvc"}) or
+        (d.get("groupId") == "org.springframework.boot" and d.get("artifactId") == "spring-boot-starter-data-rest")), None)
+    if data_rest and not security:
+        clean_source = _structure_mask(strip_comments(source_text))
+        exported_repository = bool(
+            re.search(r"@RepositoryRestResource\b(?!\s*\([^)]*\bexported\s*=\s*false)",
+                      clean_source, re.I)
+            or re.search(r"\b(?:extends|:)\s*(?:[\w.]+\.)?"
+                         r"(?:CrudRepository|JpaRepository|PagingAndSortingRepository|"
+                         r"Repository)\s*<", clean_source))
+        add("COMBO-DATA-REST-WITHOUT-SECURITY", data_rest,
+            "HIGH" if exported_repository else "MEDIUM",
+            "Spring Data REST dependency without direct Spring Security web/config dependency. "
+            "Repositories may expose CRUD endpoints automatically. Verify exported repositories, "
+            "effective runtime dependencies, gateway restrictions and application authorization. "
+            + ("Export-capable Spring Data repository found in module source." if exported_repository else
+               "No export-capable repository was recognized; export and runtime accessibility are not proven."),
+            "Restrict repository export and apply authorization to Data REST endpoints; verify the effective security chain.")
+    web = next((boot[k] for k in ("spring-boot-starter-web", "spring-boot-starter-webmvc", "spring-boot-starter-webflux") if k in boot), None)
+    if web and not security and not actuator and not data_rest and re.search(r"@(?:RestController|EnableWebSecurity)\b", _structure_mask(strip_comments(source_text))):
+        add("BOOT-WEB-WITHOUT-SECURITY", web, "MEDIUM",
+            "Web starter plus @RestController/@EnableWebSecurity in module source, without direct Spring Security dependency. This is a review hint; public endpoints "
+            "or other authentication mechanisms may be intentional.",
+            "Verify the application's authentication and authorization design and effective dependency tree.")
+    return findings
+
+
 def analyze_build_hygiene(path: str, root: str) -> List["Finding"]:
     """Checks a build file line by line for supply-chain hygiene (version-independent)."""
     try:
@@ -3673,6 +4601,7 @@ def analyze_build_hygiene(path: str, root: str) -> List["Finding"]:
                     file=rel, line=idx, rule_id=rid, rule_name=rid,
                     severity=severity, status=status, code=snippet,
                     note=note, fix=fix, fingerprint=fingerprint(rel, rid, snippet),
+                    context=context_lines([l.rstrip("\n") for l in lines], idx),
                 ))
     return out
 
@@ -3742,7 +4671,8 @@ def analyze_spel_from_request(rel: str, text: str) -> List["Finding"]:
                      "flows into parseExpression() of the same method - SpEL injection/RCE.",
                 fix="Do not parse user-influenced strings as SpEL; use SimpleEvaluationContext "
                     "or fixed expressions.",
-                fingerprint=fingerprint(rel, "SRC-SPEL-REQUEST", snippet)))
+                fingerprint=fingerprint(rel, "SRC-SPEL-REQUEST", snippet),
+                context=context_lines(text.splitlines(), line)))
     return out
 
 
@@ -3773,7 +4703,8 @@ def analyze_ldap_injection(rel: str, text: str) -> List["Finding"]:
                  "influenced input can inject filter syntax (LDAP injection, auth bypass).",
             fix="Escape special LDAP filter characters (e.g. via "
                 "org.springframework.ldap.support.LdapEncoder) or use parameterized filters.",
-            fingerprint=fingerprint(rel, "SRC-LDAP-INJECTION", snippet)))
+            fingerprint=fingerprint(rel, "SRC-LDAP-INJECTION", snippet),
+                context=context_lines(text.splitlines(), line)))
     return out
 
 
@@ -3825,7 +4756,8 @@ def analyze_log_injection(rel: str, text: str) -> List["Finding"]:
                 fix="Never log raw, unvalidated request input directly; use a parameterized "
                     "logging call (e.g. logger.info(\"token={}\", sanitize(token))) and/or strip "
                     "control characters and lookup-like syntax (${...}) before logging.",
-                fingerprint=fingerprint(rel, "SRC-LOG-INJECTION", snippet)))
+                fingerprint=fingerprint(rel, "SRC-LOG-INJECTION", snippet),
+                context=context_lines(text.splitlines(), line)))
     return out
 
 
@@ -3880,65 +4812,445 @@ def analyze_sqli_var_concat(rel: str, text: str) -> List["Finding"]:
                 fix="Use a parameterized query (PreparedStatement with bind parameters via "
                     "setString/setInt/... or JPA/MyBatis query parameters) instead of "
                     "concatenating values into the SQL string.",
-                fingerprint=fingerprint(rel, "SRC-SQLI-VAR-CONCAT", snippet)))
+                fingerprint=fingerprint(rel, "SRC-SQLI-VAR-CONCAT", snippet),
+                context=context_lines(text.splitlines(), line)))
     return out
 
 
 # Found scanning JoyChou93/java-sec-code's Cors.java: reflecting the request's
 # own Origin header back as the CORS allow-origin value is worse than a static
 # wildcard (it bypasses "no '*' with credentials"), and none of the existing
-# --- extend scan() so build hygiene + the SpEL technique run too ----------
-# A wrapper instead of editing the existing scan(): it rebinds the module name
-# 'scan' BEFORE it is called by main()/run_selftest().
-_orig_scan_before_merge = scan
-
-
-def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
-         show_hardened: bool, jobs: int, with_deps: bool,
-         paths: Optional[List[str]] = None) -> Tuple[List["Finding"], int, int]:
-    findings, n_src, n_build = _orig_scan_before_merge(
-        root, exts, exclude, skip_tests, show_hardened, jobs, with_deps, paths)
-    if with_deps:
-        targets = paths or [root]
-        _, build_files = walk(targets, exts, exclude, skip_tests, True)
-        for b in build_files:
-            findings.extend(analyze_build_hygiene(b, root))
-        # gradle-wrapper.properties is not scanned by the base -> add it here.
-        for t in targets:
-            if os.path.isfile(t) and os.path.basename(t) == "gradle-wrapper.properties":
-                findings.extend(analyze_build_hygiene(t, root))
-            elif os.path.isdir(t):
-                for r, dirs, names in os.walk(t):
-                    dirs[:] = [d for d in dirs if d not in exclude]
-                    if "gradle-wrapper.properties" in names:
-                        findings.extend(analyze_build_hygiene(
-                            os.path.join(r, "gradle-wrapper.properties"), root))
-
-    # CodeQL "source -> sink" technique for SpEL, method-scoped, in Python.
-    # (Comments are stripped first - if the base provides strip_comments - to
-    #  avoid false positives from commented-out code.)
-    targets = paths or [root]
-    src_files, _sb = walk(targets, exts, exclude, skip_tests, False)
-    _strip = globals().get("strip_comments")
-    for p in src_files:
-        if not p.endswith((".java", ".kt")):
-            continue
-        try:
-            with open(p, "r", encoding="utf-8", errors="replace") as fh:
-                txt = fh.read()
-        except OSError:
-            continue
-        rel = os.path.relpath(p, root) if root else p
-        findings.extend(analyze_spel_from_request(rel, _strip(txt) if _strip else txt))
-        findings.extend(analyze_ldap_injection(rel, _strip(txt) if _strip else txt))
-        findings.extend(analyze_log_injection(rel, _strip(txt) if _strip else txt))
-        findings.extend(analyze_sqli_var_concat(rel, _strip(txt) if _strip else txt))
-
-    return findings, n_src, n_build
-
 # ==========================================================================
 #  END MERGE BLOCK
 # ==========================================================================
+
+
+# Additional method-local web checks. Deliberately heuristic, not full taint analysis.
+EXTRA_RULE_META = {
+    "SRC-XSS-WRITER": ("MEDIUM", "Dynamic servlet writer output; inspect HTML escaping"),
+    "SRC-XSS-RESPONSE-ENTITY": ("MEDIUM", "Dynamic String in ResponseEntity; inspect response content type and encoding"),
+    "SRC-XSS-RESPONSE-BODY": ("MEDIUM", "Dynamic HTML response body without recognized output encoding"),
+    "TPL-XSS-TH-UTEXT": ("MEDIUM", "Thymeleaf unescaped dynamic text"),
+    "SRC-REQUEST-BODY-NO-VALID": ("MEDIUM", "Request-body DTO parameter without @Valid or @Validated"),
+    "COMBO-DATA-REST-WITHOUT-SECURITY": ("MEDIUM", "Spring Data REST without direct Spring Security dependency (HIGH with repository evidence)"),
+    "BOOT-WEB-WITHOUT-SECURITY": ("MEDIUM", "Web dependency plus controller/security annotation without direct Spring Security (review)"),
+    "BOOT-ACTUATOR-WITHOUT-HEALTH": ("HIGH", "Potential affected Actuator/Health combination; unresolved versions MEDIUM"),
+    "BOOT-ACTUATOR-WITHOUT-SECURITY": ("MEDIUM", "Actuator without direct Spring Security (review)"),
+    "BOOT-DEVTOOLS-PRESENT": ("MEDIUM", "DevTools production packaging review; optional dependencies LOW"),
+    "SRC-SPEL-REQUEST": ("CRITICAL", "Request input in SpEL expression parsing"),
+    "SRC-LDAP-INJECTION": ("HIGH", "Concatenated LDAP search filter"),
+    "SRC-LOG-INJECTION": ("HIGH", "Request input in log output"),
+    "SRC-SQLI-VAR-CONCAT": ("CRITICAL", "Concatenated SQL variable passed to query"),
+}
+
+
+def rule_catalog() -> Dict[str, Tuple[str, str]]:
+    catalog = {r.rid: (r.severity, r.name) for r in RULES}
+    catalog.update({rid: (sev, note) for rid, _, sev, note, _ in PROP_RULES})
+    catalog.update({"DEP-" + r.artifact.upper(): (r.severity, r.note) for r in DEP_RULES})
+    catalog.update({rid: (sev, note) for rid, _, sev, _, note, _ in BUILD_HYGIENE_RULES})
+    catalog.update(EXTRA_RULE_META)
+    catalog["OSV-<advisory-id>"] = ("DYNAMIC", "One rule per returned OSV advisory; severity comes from advisory data")
+    return catalog
+
+
+def parse_rule_patterns(values: Optional[Sequence[str]]) -> List[str]:
+    """Expand repeatable, comma-separated rule globs into one normalized list."""
+    return [part.strip().upper() for value in (values or [])
+            for part in value.split(",") if part.strip()]
+
+
+def rule_selected(rule_id: str, includes: Sequence[str], excludes: Sequence[str]) -> bool:
+    """Apply case-insensitive shell globs to a rule ID; exclusion wins."""
+    normalized = rule_id.upper()
+    included = not includes or any(fnmatch.fnmatchcase(normalized, pattern)
+                                   for pattern in includes)
+    excluded = any(fnmatch.fnmatchcase(normalized, pattern) for pattern in excludes)
+    return included and not excluded
+
+
+def rule_help_uri(rid: str) -> str:
+    if rid.startswith("OSV-"):
+        from urllib.parse import quote
+        return "https://osv.dev/vulnerability/" + quote(rid[4:], safe="")
+    if rid == "BOOT-ACTUATOR-WITHOUT-HEALTH":
+        return "https://spring.io/security/cve-2026-40976/"
+    if rid == "SRC-REQUEST-BODY-NO-VALID":
+        return "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
+    if rid == "TPL-XSS-TH-UTEXT":
+        return "https://www.thymeleaf.org/doc/tutorials/3.1/usingthymeleaf.html#unescaped-text"
+    if "XSS" in rid:
+        return "https://cwe.mitre.org/data/definitions/79.html"
+    if "DATA-REST" in rid:
+        return "https://docs.spring.io/spring-data/rest/reference/security.html"
+    # Existing rule documentation lives with the standalone project.
+    return REPO_URL
+
+
+def finding_suppressed(raw_lines: Sequence[str], finding: Finding) -> bool:
+    # Allow a suppression marker on the declaration's preceding line even
+    # when the finding is a few lines into the method body.
+    candidates = list(raw_lines[max(0, finding.line - 3):finding.line])
+    stripped_lines = strip_comments("\n".join(raw_lines)).splitlines()
+    method = enclosing_method(parse_methods(stripped_lines), finding.line)
+    if method:
+        candidates.extend(raw_lines[max(0, method.start - 4):method.start])
+    for line in candidates:
+        m = SUPPRESS_MARKER.search(line)
+        if m and (not m.group(1) or finding.rule_id.upper() in
+                  {rid.strip().upper() for rid in m.group(1).split(",")}):
+            return True
+    return False
+
+
+def _structure_mask(text: str) -> str:
+    # Keep offsets/newlines stable while hiding delimiters in string literals.
+    return re.sub(r'"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                  lambda m: re.sub(r"[^\n]", " ", m.group()), text)
+
+
+def _closing(text: str, pos: int, left: str = "(", right: str = ")") -> int:
+    depth = 0
+    for i in range(pos, len(text)):
+        if text[i] == left:
+            depth += 1
+        elif text[i] == right:
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _web_methods(text: str):
+    masked = _structure_mask(text)
+    for m in re.finditer(r"\b([A-Za-z_$][\w$]*)\s*\(", masked):
+        if m.group(1) in {"if", "for", "while", "switch", "catch", "synchronized"}:
+            continue
+        opening = masked.index("(", m.start())
+        closing = _closing(masked, opening)
+        if closing < 0:
+            continue
+        tail = re.match(r"\s*(?:throws\s+[\w.,\s]+)?(?:\s*:\s*[\w<>?.]+)?\s*\{", masked[closing + 1:])
+        if not tail:
+            continue
+        begin = closing + 1 + tail.end() - 1
+        finish = _closing(masked, begin, "{", "}")
+        if finish < 0:
+            continue
+        header_start = max(masked.rfind(";", 0, m.start()), masked.rfind("}", 0, m.start()),
+                           masked.rfind("{", 0, m.start())) + 1
+        header = text[header_start:opening]
+        if "@" == text[max(0, m.start()-1):m.start()] or not re.search(r"\b(?:[\w<>?\[\]]+\s+|fun\s+)" + re.escape(m.group(1)) + r"\s*$", header):
+            continue
+        yield header_start, opening, closing, begin, finish
+
+
+def _parameter_parts(text: str):
+    mask = _structure_mask(text)
+    start = 0
+    depth = 0
+    for i, char in enumerate(mask):
+        if char in "(<[{":
+            depth += 1
+        elif char in ")>]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            yield start, text[start:i]
+            start = i + 1
+    yield start, text[start:]
+
+
+@dataclass
+class FlowStatement:
+    text: str
+    offset: int
+    target: Optional[str]
+    expression: str
+
+
+@dataclass
+class FlowMethodAst:
+    start: int
+    body_start: int
+    body_end: int
+    sources: Dict[str, List[str]]
+    statements: List[FlowStatement]
+
+
+def _flow_statements(body: str) -> List[FlowStatement]:
+    """Build assignment/call statement nodes while respecting nested calls."""
+    masked = _structure_mask(body)
+    starts = [0]
+    paren = bracket = 0
+    for index, char in enumerate(masked):
+        if char == "(":
+            paren += 1
+        elif char == ")":
+            paren = max(0, paren - 1)
+        elif char == "[":
+            bracket += 1
+        elif char == "]":
+            bracket = max(0, bracket - 1)
+        elif char == ";" and paren == 0 and bracket == 0:
+            starts.append(index + 1)
+    nodes: List[FlowStatement] = []
+    for begin, end in zip(starts, starts[1:] + [len(body)]):
+        raw = body[begin:end]
+        if not raw.strip():
+            continue
+        assignment = re.search(r"(?<![=!<>])=(?!=)", _structure_mask(raw))
+        target: Optional[str] = None
+        expression = ""
+        if assignment:
+            left = raw[:assignment.start()]
+            names = re.findall(r"[A-Za-z_$][\w$]*", left)
+            if names:
+                target = names[-1]
+                expression = raw[assignment.end():].rstrip("; ")
+        nodes.append(FlowStatement(raw, begin, target, expression))
+    return nodes
+
+
+def build_flow_ast(text: str) -> List[FlowMethodAst]:
+    """Create a compact method AST for parameters, assignments and calls.
+
+    This is a dependency-free Java/Kotlin subset rather than a compiler AST.
+    It preserves method and statement boundaries and is used only for
+    conservative intraprocedural data flow; unsupported syntax stays with the
+    established heuristic analyzers.
+    """
+    methods: List[FlowMethodAst] = []
+    for start, opening, closing, body_start, body_end in _web_methods(text):
+        params = text[opening + 1:closing]
+        sources: Dict[str, List[str]] = {}
+        for _, param in _parameter_parts(params):
+            annotation = re.search(
+                r"@(?:[\w]+\.)*(RequestParam|PathVariable|RequestBody|RequestHeader)\b",
+                param)
+            if not annotation:
+                continue
+            without_annotations = re.sub(
+                r"@(?:[\w]+\.)*\w+(?:\s*\([^)]*\))?", "", param).strip()
+            variable = re.search(r"([A-Za-z_$][\w$]*)\s*(?:\[\])?\s*$",
+                                 without_annotations)
+            if variable:
+                sources[variable.group(1)] = ["@" + annotation.group(1), variable.group(1)]
+        body = text[body_start + 1:body_end]
+        methods.append(FlowMethodAst(start, body_start, body_end, sources,
+                                     _flow_statements(body)))
+    return methods
+
+
+def _flow_sanitizers(expression: str, inherited: Sequence[Set[str]]) -> Set[str]:
+    direct: Set[str] = set()
+    stripped = expression.strip()
+    if _encoded_expression(stripped, ""):
+        direct.add("html")
+    ldap = re.match(r"(?:LdapEncoder\.(?:filterEncode|nameEncode)|encodeFilter)\s*\(", stripped)
+    if ldap and _closing(_structure_mask(stripped), ldap.end() - 1) == len(stripped) - 1:
+        direct.add("ldap")
+    if re.search(r"replace(?:All)?\s*\([^)]*(?:\\r|\\n|\\p\{Cntrl\})", expression):
+        direct.add("log")
+    if not inherited:
+        return direct
+    common = set.intersection(*(set(value) for value in inherited))
+    return direct | common
+
+
+def analyze_structured_dataflow(rel: str, text: str) -> List[Finding]:
+    """Propagate request taint through assignment AST nodes to security sinks."""
+    out: List[Finding] = []
+    lines = text.splitlines()
+    identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    source_call = re.compile(r"\b(getParameter|getHeader|getQueryString|getReader|readLine)\s*\(")
+    for method in build_flow_ast(text):
+        paths = dict(method.sources)
+        sanitizers: Dict[str, Set[str]] = {name: set() for name in paths}
+        body_offset = method.body_start + 1
+        for statement in method.statements:
+            expr = statement.expression
+            expr_ids = [name for name in identifier.findall(expr) if name in paths]
+            call_source = source_call.search(expr)
+            if statement.target and (expr_ids or call_source):
+                inherited = [sanitizers.get(name, set()) for name in expr_ids]
+                new_path = ((paths[expr_ids[0]] if expr_ids else
+                             [call_source.group(1) + "()"])
+                            + [statement.target])
+                if statement.target in paths:
+                    # Multiple possible assignments are merged conservatively:
+                    # a sanitizer survives only if every path has it.
+                    sanitizers[statement.target] &= _flow_sanitizers(expr, inherited)
+                else:
+                    sanitizers[statement.target] = _flow_sanitizers(expr, inherited)
+                paths[statement.target] = new_path
+            masked = _structure_mask(statement.text)
+            for call in re.finditer(r"\b((?:[A-Za-z_$][\w$]*\s*\.\s*)*"
+                                    r"[A-Za-z_$][\w$]*)\s*\(", masked):
+                opening = call.end() - 1
+                closing = _closing(masked, opening)
+                if closing < 0:
+                    continue
+                callee = re.sub(r"\s+", "", call.group(1))
+                leaf = callee.rsplit(".", 1)[-1]
+                argument = statement.text[opening + 1:closing]
+                arg_ids = [name for name in identifier.findall(argument) if name in paths]
+                direct_source = source_call.search(argument)
+                if not arg_ids and not direct_source:
+                    continue
+                source_path = (paths[arg_ids[0]] if arg_ids else
+                               [direct_source.group(1) + "()"])
+                sink: Optional[Tuple[str, str, str]] = None
+                if leaf == "parseExpression":
+                    sink = ("SRC-SPEL-REQUEST", "CRITICAL", "spel")
+                elif leaf in {"executeQuery", "executeUpdate", "execute", "createQuery",
+                              "createNativeQuery", "prepareStatement", "prepareCall"}:
+                    sink = ("SRC-SQLI-VAR-CONCAT", "CRITICAL", "sql")
+                elif leaf == "search" and re.search(r"DirContext|LdapTemplate|\bldap\w*\s*\.",
+                                                    text[method.start:method.body_end], re.I):
+                    sink = ("SRC-LDAP-INJECTION", "HIGH", "ldap")
+                elif leaf in {"trace", "debug", "info", "warn", "error", "fatal"} and re.search(
+                        r"(?:^|\.)(?:logger|log|LOGGER|LOG)\.", callee):
+                    sink = ("SRC-LOG-INJECTION", "HIGH", "log")
+                elif leaf in {"write", "print", "println"} and "getWriter" in statement.text[:call.start()]:
+                    sink = ("SRC-XSS-WRITER", "HIGH", "html")
+                elif leaf in {"ok", "body"} and "ResponseEntity" in statement.text[:call.start()]:
+                    sink = ("SRC-XSS-RESPONSE-ENTITY", "MEDIUM", "html")
+                if not sink:
+                    continue
+                rid, severity, sanitizer_kind = sink
+                if arg_ids and all(sanitizer_kind in sanitizers.get(name, set()) for name in arg_ids):
+                    continue
+                position = body_offset + statement.offset + call.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else statement.text.strip()[:200]
+                flow = source_path + [callee + "()"]
+                out.append(Finding(
+                    file=rel, line=line, rule_id=rid,
+                    rule_name=EXTRA_RULE_META.get(rid, (severity, rid))[1],
+                    severity=severity, status="TAINT", code=code,
+                    note="Structured intraprocedural data flow: " + " -> ".join(flow) +
+                         ". Verify framework semantics and sanitizer suitability.",
+                    fix=("Do not pass request-controlled data to this sink; use parameterization "
+                         "or the context-appropriate encoder."),
+                    flow=flow, fingerprint=fingerprint(rel, rid, code),
+                    context=context_lines(lines, line)))
+    return out
+
+
+def dedupe_findings(findings: Sequence[Finding]) -> List[Finding]:
+    """Collapse overlapping heuristic/structured findings at the same sink."""
+    by_sink: Dict[Tuple[str, int, str], Finding] = {}
+    order: List[Tuple[str, int, str]] = []
+    for finding in findings:
+        key = (finding.file, finding.line, finding.rule_id)
+        if key not in by_sink:
+            order.append(key)
+            by_sink[key] = finding
+        elif finding.flow and not by_sink[key].flow:
+            by_sink[key] = finding
+    return [by_sink[key] for key in order]
+
+
+def analyze_web_source(rel: str, text: str) -> List[Finding]:
+    findings: List[Finding] = []
+    lines = text.splitlines()
+    def add(rid, pos, note, fix, severity="MEDIUM"):
+        line = text.count("\n", 0, pos) + 1
+        code = lines[line - 1].strip()
+        findings.append(Finding(file=rel, line=line, rule_id=rid,
+            rule_name=EXTRA_RULE_META[rid][1], severity=severity, status="REVIEW",
+            code=code, note=note, fix=fix, fingerprint=fingerprint(rel, rid, code),
+            context=context_lines(lines, line)))
+    for start, op, close, begin, end in _web_methods(text):
+        signature = text[start:begin]
+        params = text[op + 1:close]
+        body = text[begin + 1:end]
+        for offset, param in _parameter_parts(params):
+            request_body = re.search(r"@(?:[\w]+\.)*RequestBody\b", param)
+            if not request_body or re.search(r"@(?:[\w]+\.)*(?:Valid|Validated)\b", param):
+                continue
+            plain = re.sub(r"@(?:[\w]+\.)*\w+(?:\s*\([^)]*\))?", "", param).strip()
+            if re.search(r"\b(?:String|int|long|boolean|double|float|byte|short|char|Integer|Long|Boolean|Double|Float|Byte|Short|Character|Map|List|Set|Collection)\b", plain):
+                continue
+            add("SRC-REQUEST-BODY-NO-VALID", op + 1 + offset + request_body.start(),
+                "DTO request parameter has no @Valid/@Validated on this parameter. Bean constraints may not run; "
+                "manual validation and actual DTO constraints are not resolved.",
+                "Annotate the DTO parameter with @Valid or @Validated and configure a Bean Validation provider.")
+        # Track string parameters and local string assignments, not arbitrary DTOs.
+        string_names = set(re.findall(r"\bString\s+(\w+)|\b(\w+)\s*:\s*String\b", params + "\n" + body))
+        strings = {name for pair in string_names for name in pair if name}
+        html_response = bool(re.search(r'text/html|TEXT_HTML', signature + body))
+        non_html_response = bool(re.search(r'application/json|APPLICATION_JSON|text/plain|TEXT_PLAIN', signature + body)) and not html_response
+        sinks = []
+        for match in re.finditer(r"\.getWriter\s*\(\s*\)\s*\.\s*(?:write|print|println)\s*\(", body):
+            sinks.append((match, "SRC-XSS-WRITER"))
+        for match in re.finditer(r"\bResponseEntity\s*\.\s*ok\s*\(", body):
+            sinks.append((match, "SRC-XSS-RESPONSE-ENTITY"))
+        # Support ResponseEntity.ok().contentType(TEXT_HTML).body(value).
+        for match in re.finditer(r"\bResponseEntity\s*\.\s*ok\s*\(\s*\)[^;]*?\.body\s*\(", body):
+            sinks.append((match, "SRC-XSS-RESPONSE-ENTITY"))
+        for match, rid in sinks:
+            opening = match.end() - 1
+            closing = _closing(_structure_mask(body), opening)
+            if closing < 0:
+                continue
+            expr = body[opening + 1:closing].strip()
+            if not expr or not _structure_mask(expr).strip() or non_html_response:
+                continue
+            if _encoded_expression(expr, body[:match.start()]):
+                continue
+            if rid == "SRC-XSS-RESPONSE-ENTITY" and not (re.search(r'"|getParameter\s*\(', expr) or any(re.search(r"\b" + re.escape(n) + r"\b", expr) for n in strings)):
+                continue
+            add(rid, begin + 1 + match.start(),
+                "Dynamic response output without recognized HTML encoding. Verify content type and whether input is attacker-controlled; "
+                "a response sink alone does not prove XSS.",
+                "Use context-appropriate HTML encoding, or return a structured JSON DTO with the correct content type.",
+                "HIGH" if html_response else "MEDIUM")
+        if html_response and ("@ResponseBody" in signature or "@RestController" in text[:start]):
+            for match in re.finditer(r"\breturn\s+([^;]+);", body):
+                expr = match.group(1).strip()
+                if "ResponseEntity" in expr or not _structure_mask(expr).strip() or _encoded_expression(expr, body[:match.start()]):
+                    continue
+                if not (re.search(r'"|getParameter\s*\(', expr) or any(re.search(r"\b" + re.escape(n) + r"\b", expr) for n in strings)):
+                    continue
+                add("SRC-XSS-RESPONSE-BODY", begin + 1 + match.start(),
+                    "Dynamic HTML response body; untrusted values require HTML output encoding. Data flow is not proven.",
+                    "Encode untrusted text for its HTML context or render through an escaping template.", "HIGH")
+    return findings
+
+
+def _encoded_expression(expr: str, preceding: str) -> bool:
+    encoder = r"(?:HtmlUtils\.htmlEscape|StringEscapeUtils\.escapeHtml[34]?|Encode\.forHtml(?:Content)?)"
+    def entire_encoded(value):
+        m = re.match(encoder + r"\s*\(", value.strip())
+        return bool(m and _closing(_structure_mask(value.strip()), m.end() - 1) == len(value.strip()) - 1)
+    if entire_encoded(expr):
+        return True
+    if re.fullmatch(r"\w+", expr):
+        assignments = list(re.finditer(r"\b" + re.escape(expr) + r"\s*(\+?=)\s*([^;]+);", preceding))
+        # Every reaching assignment must be encoded. Trusting only the last
+        # textual assignment misses unsafe conditional branches.
+        if assignments:
+            return all(m.group(1) == "=" and entire_encoded(m.group(2))
+                       for m in assignments)
+    return False
+
+
+def analyze_template(rel: str, text: str) -> List[Finding]:
+    clean = re.sub(r"<!--[\s\S]*?-->", lambda m: re.sub(r"[^\n]", " ", m.group()), text)
+    findings = []
+    for m in re.finditer(r'''\b(?:th:utext|data-th-utext)\s*=\s*(["'])([\s\S]*?)\1''', clean):
+        if not re.search(r"[$*#]\{|\[\[|\[\(", m.group(2)):
+            continue
+        line = clean.count("\n", 0, m.start()) + 1
+        code = text.splitlines()[line - 1].strip()
+        rid = "TPL-XSS-TH-UTEXT"
+        findings.append(Finding(file=rel, line=line, rule_id=rid, rule_name=EXTRA_RULE_META[rid][1],
+            severity="MEDIUM", status="REVIEW", code=code,
+            note="Dynamic unescaped template output. Verify trust/sanitization of the model value; this is not proof of exploitability.",
+            fix="Use th:text for ordinary text; sanitize intentionally supported HTML with an appropriate allowlist.",
+            fingerprint=fingerprint(rel, rid, code), context=context_lines(text.splitlines(), line)))
+    return findings
 
 
 if __name__ == "__main__":
