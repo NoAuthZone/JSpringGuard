@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Security-Check 3.4 - static analysis of JVM source code for XXE and Spring
+Security-Check 3.6 - static analysis of JVM source code for XXE and Spring
 Security weaknesses.
 
 STANDALONE TOOL: this single file is everything you need for its native rules. No Semgrep,
@@ -43,6 +43,10 @@ New in 3.4:
   * visible source-to-sink flow paths in text, HTML, Markdown, JSON and SARIF
   * optional --codeql-sarif import for CodeQL Action/CLI results without bundling CodeQL
 
+New in 3.6:
+  * full-file context display by default (--context 0: matched line only; --context N: ±N lines)
+  * HTML report: scrollable source blocks (max-height 420 px) with auto-scroll to finding line
+
 No third-party dependencies. Python 3.8+.
 
 Examples:
@@ -79,7 +83,7 @@ from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-VERSION = "3.4.3"
+VERSION = "3.6"
 AUTHOR = "NoAuthZone"
 AUTHOR_URL = "https://github.com/NoAuthZone"
 REPO_URL = "https://github.com/NoAuthZone/JSpringGuard"
@@ -1469,7 +1473,7 @@ def bump(severity: str, steps: int) -> str:
     return SEVERITY_LIST[idx]
 
 
-CONTEXT_RADIUS = 3
+CONTEXT_RADIUS = 999_999  # 0 = nur Treffer-Zeile; grosser Wert = ganze Datei
 
 
 def context_lines(raw_lines: Sequence[str], line_no: int,
@@ -1478,8 +1482,17 @@ def context_lines(raw_lines: Sequence[str], line_no: int,
 
     A single matched line is often not enough to judge a finding - whether a
     parser is hardened two lines further down, or what a concatenated SQL
-    string actually contains, only shows in context."""
-    if radius <= 0 or not raw_lines:
+    string actually contains, only shows in context.
+
+    radius <= 0  → matched line only (use --context 0 to select this)
+    radius large → entire file (default; all lines visible, finding highlighted)
+    """
+    if not raw_lines:
+        return []
+    if radius <= 0:
+        # radius 0: nur die Treffer-Zeile zurückgeben
+        if 1 <= line_no <= len(raw_lines):
+            return [(line_no, raw_lines[line_no - 1].rstrip("\n"))]
         return []
     start = max(1, line_no - radius)
     end = min(len(raw_lines), line_no + radius)
@@ -2698,7 +2711,7 @@ def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bo
 
 HTML_CSS = """
 .context-hit{display:inline-block;min-width:100%;background:var(--warn-soft);font-weight:bold}
-.source-context{white-space:pre;overflow-x:auto}
+.source-context{white-space:pre;overflow-x:auto;max-height:420px;overflow-y:auto;border-radius:var(--r-sm)}
 
 :root{
 color-scheme:dark;
@@ -3065,6 +3078,11 @@ if(clearBtn) clearBtn.addEventListener('click', function(){
               'Export first if you want to keep them.')) return;
   triage = {};
   saveTriage(); renderAllTriage(); applyFilters();
+});
+// Scrollt jeden Code-Block automatisch auf die markierte Treffer-Zeile
+document.querySelectorAll('.source-context').forEach(function(pre){
+  var hit = pre.querySelector('.context-hit');
+  if(hit) pre.scrollTop = hit.offsetTop - pre.clientHeight / 2;
 });
 })();
 """
@@ -3859,8 +3877,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--baseline", help="JSON baseline: fingerprints it contains are hidden")
     ap.add_argument("--write-baseline", metavar="PATH", help="Save current findings as a baseline")
     ap.add_argument("--show-fix", action="store_true", help="Also print a fix snippet per finding")
-    ap.add_argument("--context", type=int, default=3, metavar="N",
-                    help="Source lines before and after findings (default 3; 0: matched line only)")
+    ap.add_argument("--context", type=int, default=999_999, metavar="N",
+                    help="Source lines before and after findings (default: entire file; 0: matched line only; N: ±N lines)")
     ap.add_argument("--jobs", type=int, default=4, help="Parallel readers (default 4)")
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--list-rules", action="store_true", help="List all rule IDs, base severities and descriptions; no scan required")
