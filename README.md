@@ -2,7 +2,7 @@
 
 **Static security scanner for Spring Boot / JVM projects — one Python file, zero dependencies.**
 
-[![Version](https://img.shields.io/badge/version-3.4.3-blue)](https://github.com/NoAuthZone/JSpringGuard)
+[![Version](https://img.shields.io/badge/version-3.6-blue)](https://github.com/NoAuthZone/JSpringGuard)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/) 
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](#requirements) 
 [![Single file](https://img.shields.io/badge/install-none-lightgrey)](#quick-start) 
