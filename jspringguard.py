@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Security-Check 3.6 - static analysis of JVM source code for XXE and Spring
-Security weaknesses.
+JSpringGuard 3.8 - Static security analysis for JVM projects with offline OSV support.
 
 STANDALONE TOOL: this single file is everything you need for its native rules. No Semgrep,
 CodeQL CLI/database, no other scripts, and no third-party Python packages -
@@ -47,6 +46,28 @@ New in 3.6:
   * full-file context display by default (--context 0: matched line only; --context N: ±N lines)
   * HTML report: scrollable source blocks (max-height 420 px) with auto-scroll to finding line
 
+New in 3.8:
+  * local OSV Maven database for offline scanning of Maven and Gradle dependencies
+  * database download/update, local ZIP import, and snapshot metadata
+  * full dependency coordinates, conservative version checks, and explicit unresolved findings
+  * corrected CVE mappings, exact OSV query versions, pagination, and clearer cache reporting
+  * cross-line source detection and conservative XXE hardening checks before first use
+
+New in 3.7:
+  * 13 standalone positive-hardening rules (HARDEN-*), independent of any nearby risky
+    construct: BCrypt work factor, Argon2/SCrypt/PBKDF2, SecureRandom, explicit CSP/HSTS,
+    HttpOnly/Secure cookies, @PreAuthorize/@PostAuthorize/@EnableMethodSecurity, CORS pinned
+    to an explicit HTTPS origin, explicit XXE DOCTYPE disallow, literal PreparedStatement
+    queries, Bean Validation constraint annotations, and @Valid/@Validated on @RequestBody DTOs
+  * --show-hardened is now on by default so these (and existing guard-based HARDENED
+    findings) always show; --hide-hardened restores the old terse behavior
+  * Windows CLI fix: a quoted path with a single trailing backslash (misparsed by
+    cmd.exe/PowerShell) now gets a clear error instead of silently scanning nothing
+  * more specific finding messages: matched construct text on sink/antipattern rules,
+    the bare parameter name on SRC-LOG-INJECTION, and the DTO type/parameter/method on
+    SRC-REQUEST-BODY-NO-VALID
+  * HTML report: context line numbers are now padded/aligned like the terminal report
+
 No third-party dependencies. Python 3.8+.
 
 Examples:
@@ -83,7 +104,7 @@ from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-VERSION = "3.6"
+VERSION = "3.8"
 AUTHOR = "NoAuthZone"
 AUTHOR_URL = "https://github.com/NoAuthZone"
 REPO_URL = "https://github.com/NoAuthZone/JSpringGuard"
@@ -174,7 +195,7 @@ class Rule:
     note: str = ""
     always_report: bool = False
     fix: str = ""
-    kind: str = "sink"          # sink | antipattern
+    kind: str = "sink"          # sink | antipattern | hardening
 
 
 FIX_JAXP = """DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
@@ -1035,80 +1056,47 @@ class DepRule:
     fixed: Optional[str]
     severity: str
     note: str
+    groups: Sequence[str] = ()
 
 
 DEP_RULES: List[DepRule] = [
-    DepRule("dom4j", "2.1.3", "HIGH",
-            "dom4j before 2.1.3 parses external entities by default (XXE)."),
-    DepRule("xstream", "1.4.21", "CRITICAL",
-            "Numerous RCE gadget CVEs. Risky even in current versions without a type allowlist."),
-    DepRule("jdom", "2.0.6.1", "HIGH",
-            "JDOM before 2.0.6.1 is XXE-vulnerable (incl. CVE-2021-33813)."),
-    DepRule("jdom2", "2.0.6.1", "HIGH",
-            "JDOM2 before 2.0.6.1 is XXE-vulnerable."),
-    DepRule("woodstox-core", "6.4.0", "MEDIUM",
-            "Woodstox before 6.4.0 / 5.4.0: DoS via deeply nested structures."),
-    DepRule("xercesImpl", None, "MEDIUM",
-            "Standalone Xerces version on the classpath: JAXP hardening may behave "
-            "differently than the JDK implementation's. Check the version and necessity."),
-    DepRule("commons-digester", None, "LOW",
-            "Digester uses SAX - check parser hardening."),
-    DepRule("spring-oxm", None, "LOW",
-            "Check the Jaxb2Marshaller configuration for setSupportDtd/setProcessExternalEntities."),
-    DepRule("castor-xml", None, "MEDIUM",
-            "Castor-XML is considered unmaintained; check XXE hardening manually."),
+    DepRule('dom4j', '2.1.3', 'HIGH', 'Legacy minimum-version review hint (2.1.3); not a verified CVE range or universal safe version.'),
+    DepRule('xstream', '1.4.21', 'CRITICAL', 'Legacy minimum-version review hint (1.4.21); not a verified CVE range or universal safe version.'),
+    DepRule('jdom', '2.0.6.1', 'HIGH', 'Legacy minimum-version review hint (2.0.6.1); not a verified CVE range or universal safe version.'),
+    DepRule('jdom2', '2.0.6.1', 'HIGH', 'Legacy minimum-version review hint (2.0.6.1); not a verified CVE range or universal safe version.'),
+    DepRule('woodstox-core', '6.4.0', 'MEDIUM', 'Legacy minimum-version review hint (6.4.0); not a verified CVE range or universal safe version.'),
+    DepRule('xercesImpl', None, 'MEDIUM', 'Dependency configuration review; package presence alone does not prove a vulnerability.'),
+    DepRule('commons-digester', None, 'LOW', 'Dependency configuration review; package presence alone does not prove a vulnerability.'),
+    DepRule('spring-oxm', None, 'LOW', 'Dependency configuration review; package presence alone does not prove a vulnerability.'),
+    DepRule('castor-xml', None, 'MEDIUM', 'Dependency configuration review; package presence alone does not prove a vulnerability.'),
     # Spring Security / Boot
-    DepRule("spring-security-core", "5.8.0", "HIGH",
-            "Spring Security < 5.8: auth-bypass CVEs (incl. CVE-2022-22978, -22976)."),
-    DepRule("spring-security-web", "5.8.0", "HIGH",
-            "Spring Security Web < 5.8: request-matcher bypass possible."),
-    DepRule("spring-security-config", "5.8.0", "HIGH",
-            "Spring Security Config < 5.8: configuration can be bypassed."),
-    DepRule("spring-boot-starter-security", "3.0.0", "MEDIUM",
-            "Spring Boot 2.x end of life. Migration to 3.x recommended."),
-    DepRule("spring-boot-autoconfigure", "2.7.0", "MEDIUM",
-            "Spring Boot < 2.7.0: various CVEs in autoconfig modules."),
-    DepRule("spring-webmvc", "5.3.20", "MEDIUM",
-            "Spring MVC < 5.3.20: path traversal (CVE-2022-22970)."),
-    DepRule("nimbus-jose-jwt", "9.31", "HIGH",
-            "Nimbus JOSE+JWT < 9.31: algorithm-confusion attacks possible."),
-    DepRule("jjwt", "0.12.0", "MEDIUM",
-            "JJWT < 0.12.0: 'none' algorithm possible."),
-    DepRule("jjwt-api", "0.12.0", "MEDIUM",
-            "JJWT-API < 0.12.0: no automatic algorithm whitelist."),
-    DepRule("java-jwt", "4.3.0", "MEDIUM",
-            "Auth0 Java JWT < 4.3.0: algorithm-confusion CVEs."),
+    DepRule('spring-security-core', '5.8.0', 'HIGH', 'Legacy minimum-version review hint (5.8.0); not a verified CVE range or universal safe version.'),
+    DepRule('spring-security-web', '5.8.0', 'HIGH', 'Legacy minimum-version review hint (5.8.0); not a verified CVE range or universal safe version.'),
+    DepRule('spring-security-config', '5.8.0', 'HIGH', 'Legacy minimum-version review hint (5.8.0); not a verified CVE range or universal safe version.'),
+    DepRule('spring-boot-starter-security', '3.0.0', 'MEDIUM', 'Legacy minimum-version review hint (3.0.0); not a verified CVE range or universal safe version.'),
+    DepRule('spring-boot-autoconfigure', '2.7.0', 'MEDIUM', 'Legacy minimum-version review hint (2.7.0); not a verified CVE range or universal safe version.'),
+    DepRule('spring-webmvc', '5.3.20', 'MEDIUM', 'Legacy minimum-version review hint (5.3.20); not a verified CVE range or universal safe version.'),
+    DepRule('nimbus-jose-jwt', '9.31', 'HIGH', 'Legacy minimum-version review hint (9.31); not a verified CVE range or universal safe version.'),
+    DepRule('jjwt', '0.12.0', 'MEDIUM', 'Legacy minimum-version review hint (0.12.0); not a verified CVE range or universal safe version.'),
+    DepRule('jjwt-api', '0.12.0', 'MEDIUM', 'Legacy minimum-version review hint (0.12.0); not a verified CVE range or universal safe version.'),
+    DepRule('java-jwt', '4.3.0', 'MEDIUM', 'Legacy minimum-version review hint (4.3.0); not a verified CVE range or universal safe version.'),
     # Critical ecosystem CVEs
     DepRule("log4j-core", "2.17.1", "CRITICAL",
             "Log4Shell CVE-2021-44228: JNDI RCE via log input."),
-    DepRule("log4j-api", "2.17.1", "CRITICAL",
-            "Log4Shell CVE-2021-44228: log4j-api as a transitive trigger."),
-    DepRule("spring-cloud-gateway", "3.1.1", "CRITICAL",
-            "SpEL injection via Actuator route CVE-2022-22947: RCE without auth."),
-    DepRule("spring-data-commons", "2.6.3", "HIGH",
-            "SpEL injection CVE-2022-22980 in spring-data-commons."),
-    DepRule("snakeyaml", "2.0", "HIGH",
-            "Unsafe YAML load CVE-2022-1471: deserialization RCE."),
-    DepRule("jackson-databind", "2.14.0", "HIGH",
-            "Polymorphic deserialization CVEs; from 2.14 default safe typing is active."),
-    DepRule("commons-text", "1.10.0", "HIGH",
-            "Text4Shell CVE-2022-42889: StringSubstitutor with script/dns/url lookups."),
-    DepRule("h2", "2.1.210", "CRITICAL",
-            "H2 console RCE via INIT/TRACE CVE-2021-42392 and CVE-2022-45868."),
-    DepRule("logback-classic", "1.2.11", "HIGH",
-            "JNDI lookup in Logback CVE-2021-42550: RCE via a manipulated log server."),
-    DepRule("logback-core", "1.2.11", "HIGH",
-            "Logback-core CVE-2021-42550 (transitive dependency of logback-classic)."),
-    DepRule("tomcat-embed-core", "10.1.5", "HIGH",
-            "Various RCE/DoS CVEs in older Tomcat versions (CVE-2022-42252 among others)."),
-    DepRule("spring-cloud-netflix-eureka-client", None, "MEDIUM",
-            "Eureka client SSRF: server.url could point to an internal network. Check the URL."),
-    DepRule("spring-data-rest-core", "3.7.0", "HIGH",
-            "Spring Data REST < 3.7.0: SpEL injection (successor to CVE-2017-8046)."),
-    DepRule("commons-collections", "3.2.2", "CRITICAL",
-            "Commons Collections < 3.2.2: gadget chain for Java deserialization (RCE)."),
-    DepRule("commons-collections4", "4.1", "CRITICAL",
-            "Commons Collections4 < 4.1: gadget chain for Java deserialization (RCE)."),
+    DepRule('spring-cloud-gateway', '3.1.1', 'CRITICAL', 'Legacy minimum-version review hint (3.1.1); not a verified CVE range or universal safe version.'),
+    DepRule("spring-data-mongodb", "3.4.1", "CRITICAL",
+            "CVE-2022-22980: conditional SpEL injection in Spring Data MongoDB; branch-aware version assessment."),
+    DepRule('snakeyaml', '2.0', 'HIGH', 'Legacy minimum-version review hint (2.0); not a verified CVE range or universal safe version.'),
+    DepRule('jackson-databind', '2.14.0', 'HIGH', 'Legacy minimum-version review hint (2.14.0); not a verified CVE range or universal safe version.'),
+    DepRule('commons-text', '1.10.0', 'HIGH', 'Legacy minimum-version review hint (1.10.0); not a verified CVE range or universal safe version.'),
+    DepRule('h2', '2.1.210', 'CRITICAL', 'Legacy minimum-version review hint (2.1.210); not a verified CVE range or universal safe version.'),
+    DepRule('logback-classic', '1.2.11', 'HIGH', 'Legacy minimum-version review hint (1.2.11); not a verified CVE range or universal safe version.'),
+    DepRule('logback-core', '1.2.11', 'HIGH', 'Legacy minimum-version review hint (1.2.11); not a verified CVE range or universal safe version.'),
+    DepRule('tomcat-embed-core', '10.1.5', 'HIGH', 'Legacy minimum-version review hint (10.1.5); not a verified CVE range or universal safe version.'),
+    DepRule('spring-cloud-netflix-eureka-client', None, 'MEDIUM', 'Dependency configuration review; package presence alone does not prove a vulnerability.'),
+    DepRule('spring-data-rest-core', '3.7.0', 'HIGH', 'Legacy minimum-version review hint (3.7.0); not a verified CVE range or universal safe version.'),
+    DepRule('commons-collections', '3.2.2', 'CRITICAL', 'Legacy minimum-version review hint (3.2.2); not a verified CVE range or universal safe version.'),
+    DepRule('commons-collections4', '4.1', 'CRITICAL', 'Legacy minimum-version review hint (4.1); not a verified CVE range or universal safe version.'),
 ]
 
 MAVEN_DEP = re.compile(
@@ -1132,74 +1120,8 @@ _MAVEN_TAG_ARTIFACT = re.compile(r"<artifactId>\s*([^<\s]+)\s*</artifactId>", re
 _MAVEN_TAG_VERSION = re.compile(r"<version>\s*([^<\s]+)\s*</version>", re.I)
 
 
-def _maven_parent_pom_path(pom_path: str, content: str) -> Optional[str]:
-    """Locates the parent pom of a multi-module build ON DISK.
-
-    Honours an explicit <relativePath>, otherwise falls back to Maven's own
-    default of '../pom.xml'. Only local files are considered - resolving a
-    parent from a remote repository would need network access and is a
-    separate, opt-in concern."""
-    m = _MAVEN_PARENT_BLOCK.search(content)
-    if not m:
-        return None
-    block = m.group(1)
-    base = os.path.dirname(os.path.abspath(pom_path))
-    rel = _MAVEN_RELPATH.search(block)
-    if rel:
-        raw = rel.group(1).strip()
-        if not raw:                       # <relativePath/> means "no local parent"
-            return None
-        cand = os.path.normpath(os.path.join(base, raw))
-        if os.path.isdir(cand):
-            cand = os.path.join(cand, "pom.xml")
-    else:
-        cand = os.path.normpath(os.path.join(base, "..", "pom.xml"))
-    return cand if os.path.isfile(cand) else None
 
 
-def maven_resolution_context(pom_path: str, content: str,
-                             max_depth: int = 6) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Builds (properties, managed_versions) for a pom, walking up the local
-    parent chain.
-
-    managed_versions is keyed both by 'groupId:artifactId' and by bare
-    'artifactId', because the rule set matches on the artifact alone.
-    Values closer to the child win, mirroring Maven's own precedence.
-    Returns raw strings; ${...} placeholders are resolved by the caller
-    against the merged properties."""
-    chain: List[str] = []
-    seen: Set[str] = set()
-    cur_path, cur_content = pom_path, content
-    for _ in range(max_depth):
-        chain.append(cur_content)
-        parent = _maven_parent_pom_path(cur_path, cur_content)
-        if not parent or parent in seen:
-            break
-        seen.add(parent)
-        try:
-            with open(parent, "r", encoding="utf-8", errors="replace") as fh:
-                cur_content = fh.read()
-        except OSError:
-            break
-        cur_path = parent
-
-    props: Dict[str, str] = {}
-    managed: Dict[str, str] = {}
-    # Walk parents first so that nearer definitions overwrite them.
-    for text in reversed(chain):
-        for k, v in MAVEN_PROPERTY.findall(text):
-            props[k] = v
-        for mgmt in _MAVEN_DEPMGMT_BLOCK.finditer(text):
-            for entry in _MAVEN_DEP_ENTRY.finditer(mgmt.group(1)):
-                block = entry.group(1)
-                g = _MAVEN_TAG_GROUP.search(block)
-                a = _MAVEN_TAG_ARTIFACT.search(block)
-                v = _MAVEN_TAG_VERSION.search(block)
-                if a and v:
-                    managed[a.group(1)] = v.group(1)
-                    if g:
-                        managed[f"{g.group(1)}:{a.group(1)}"] = v.group(1)
-    return props, managed
 
 GRADLE_DEP = re.compile(r"[\'\"]([\w.\-]+):([\w.\-]+):([\w.\-]+)[\'\"]")
 GRADLE_VERSION_BLOCK = re.compile(
@@ -1215,17 +1137,6 @@ GRADLE_CONSTRAINT = re.compile(
     r"constraints\s*\{[^}]*?(?:implementation|api|runtimeOnly)\s*"
     r"[\'\"]([\w.\-]+):([\w.\-]+):([\w.\-]+)[\'\"]",
     re.S)
-SPRING_BOOT_MANAGED: Dict[str, Dict[str, str]] = {
-    "3.2": {"spring-security-core": "6.2.0", "nimbus-jose-jwt": "9.37.3",
-            "snakeyaml": "2.2", "logback-classic": "1.4.14", "tomcat-embed-core": "10.1.18",
-            "jackson-databind": "2.16.1", "h2": "2.2.224"},
-    "3.1": {"spring-security-core": "6.1.0", "nimbus-jose-jwt": "9.37.1",
-            "snakeyaml": "2.0", "logback-classic": "1.4.11", "tomcat-embed-core": "10.1.13",
-            "jackson-databind": "2.15.2", "h2": "2.2.220"},
-    "2.7": {"spring-security-core": "5.7.10", "nimbus-jose-jwt": "9.31",
-            "snakeyaml": "1.33", "logback-classic": "1.2.12", "tomcat-embed-core": "9.0.83",
-            "jackson-databind": "2.13.5", "h2": "2.1.214"},
-}
 SPRING_BOOT_VER = re.compile(
     r"spring[\-_]boot[\-_]starter[\-_]parent.*?<version>\s*([\d.]+)\s*</version>|"
     r"id\s*[\'\"]org\.springframework\.boot[\'\"]\s*version\s*[\'\"]([\d.]+)[\'\"]",
@@ -1237,10 +1148,6 @@ def version_tuple(ver: str) -> Tuple[int, ...]:
     return tuple(int(p) for p in parts[:5]) or (0,)
 
 
-def is_older(found: str, fixed: str) -> bool:
-    if re.search(r"\$\{|\+|latest|SNAPSHOT", found, re.I):
-        return False
-    return version_tuple(found) < version_tuple(fixed)
 
 
 # --------------------------------------------------------------------------
@@ -1427,11 +1334,9 @@ def collect_guards(lines: Sequence[str], var: Optional[str]) -> Set[str]:
     found: Set[str] = set()
     var_re = re.compile(r"\b" + re.escape(var) + r"\s*\.") if var else None
     for line in lines:
-        hits = [gid for gid, pat in GUARD_PATTERNS.items() if pat.search(line)]
-        if not hits:
+        if var_re is not None and not var_re.search(line):
             continue
-        if var_re is None or var_re.search(line):
-            found.update(hits)
+        found.update(gid for gid, pat in GUARD_PATTERNS.items() if pat.search(line))
     return found
 
 
@@ -1443,9 +1348,11 @@ def build_helper_index(files_data: Dict[str, Tuple[List[str], List[Method]]]) ->
             if not FACTORY_RETURN_HINT.search(m.ret or ""):
                 continue
             body = lines[m.start - 1:m.end]
-            guards = collect_guards(body, None)
-            if guards:
-                index.setdefault(m.name, set()).update(guards)
+            guards = _helper_xml_guards(body)
+            if m.name in index:
+                index[m.name].intersection_update(guards)
+            else:
+                index[m.name] = guards
     return index
 
 
@@ -1454,6 +1361,12 @@ def taint_hints(text: str) -> List[str]:
 
 
 def evaluate(rule: Rule, guards: Set[str]) -> Tuple[str, List[str]]:
+    if rule.kind == "hardening":
+        # Standalone positive-practice rules: the pattern match itself IS the
+        # good practice, independent of any nearby risky construct or guard
+        # collection - so it is always reported as HARDENED (same status/
+        # filtering path as a properly-guarded sink), never VULNERABLE/REVIEW.
+        return "HARDENED", []
     if rule.kind == "antipattern":
         return "ANTIPATTERN", []
     if rule.always_report:
@@ -1593,14 +1506,176 @@ def load_file(path: str) -> Optional[Tuple[str, List[str], List[str], List[Metho
     return raw, raw.splitlines(), lines, parse_methods(lines)
 
 
+
+def _candidate_rules(lines: Sequence[str], rules: Sequence[Rule]) -> List[Rule]:
+    """Skip only rules whose mandatory literals are absent from the whole file.
+
+    The actual regex still determines every match. Match metadata is bound to
+    compiled patterns, so new or changed rules automatically use the slow path.
+    Non-ASCII input bypasses case-insensitive prefilters to preserve Python's
+    Unicode IGNORECASE semantics (including dotted/dotless I and long S).
+    """
+    source = "\n".join(lines)
+    ascii_source = source.isascii()
+    folded = source.lower() if ascii_source else ""
+    candidates = []
+    for rule in rules:
+        literals = _RULE_PREFILTERS.get(rule.pattern)
+        if not literals or (rule.pattern.flags & re.I and not ascii_source):
+            candidates.append(rule)
+            continue
+        haystack = folded if rule.pattern.flags & re.I else source
+        if any(literal in haystack for literal in literals):
+            candidates.append(rule)
+    return candidates
+
+
+
+def _source_matches(lines, rules):
+    """Preserve line matches and add cross-line matches at original offsets."""
+    from bisect import bisect_right
+    text = "\n".join(lines)
+    starts = [0]
+    starts.extend(m.end() for m in re.finditer("\n", text))
+    matches = {}
+    for rule in rules:
+        for index, line in enumerate(lines):
+            match = rule.pattern.search(line)
+            if match:
+                matches[(index + 1, rule.rid)] = (
+                    rule, match, starts[index] + match.start(), line)
+        for match in rule.pattern.finditer(text):
+            if "\n" not in match.group():
+                continue
+            index = bisect_right(starts, match.start()) - 1
+            # Include a split assignment preceding the matched constructor.
+            begin = max(text.rfind(c, 0, match.start()) for c in ";{}") + 1
+            snippet = text[begin:match.end()]
+            matches.setdefault((index + 1, rule.rid),
+                               (rule, match, match.start(), snippet))
+    by_line = {}
+    order = {id(rule): i for i, rule in enumerate(rules)}
+    for (line, _), value in matches.items():
+        by_line.setdefault(line, []).append(value)
+    for values in by_line.values():
+        values.sort(key=lambda value: order[id(value[0])])
+    masked = _structure_mask(text)
+    seen_assignments = set()
+    for line_number in sorted(by_line):
+        normalized = []
+        for rule, match, position, snippet in by_line[line_number]:
+            begin = max(masked.rfind(c, 0, position) for c in ";{}") + 1
+            end = masked.find(";", position)
+            statement = text[begin:end if end >= 0 else len(text)]
+            assignment = VAR_ASSIGN.search(statement)
+            if assignment and begin + assignment.start() <= position + len(match.group()):
+                key = (begin, rule.rid)
+                if key in seen_assignments:
+                    continue
+                seen_assignments.add(key)
+                snippet = statement
+            normalized.append((rule, match, position, snippet))
+        by_line[line_number] = normalized
+    return text, by_line
+
+
+def _xml_guard_evidence(text, masked, bounds, position, variable, initial=()):
+    """Trust only direct, unconditional configuration before first object use.
+
+    This is deliberately conservative, not a control-flow proof. Branches,
+    reassignment, unknown setters and unsupported statements invalidate proof.
+    The caller may still report an explicit feature setting as REVIEW.
+    """
+    if not variable:
+        return set(), []
+    enclosing = [b for b in bounds if b[3] < position < b[4]]
+    if not enclosing:
+        return set(), []
+    boundary = min(enclosing, key=lambda b: b[4] - b[3])[4]
+    declaration_end = masked.find(";", position, boundary)
+    if declaration_end < 0:
+        return set(), []
+    guards = set(initial)
+    evidence = []
+    begin = declaration_end + 1
+    receiver = re.compile(r"^\s*" + re.escape(variable) + r"\s*\.\s*(\w+)\s*\(")
+    mention = re.compile(r"\b" + re.escape(variable) + r"\b")
+    tail_start = begin
+    for terminator in re.finditer(";", masked[tail_start:boundary]):
+        end = tail_start + terminator.start()
+        statement = text[begin:end]
+        structure = masked[begin:end]
+        if re.search(r"[{}]|\b(?:if|else|for|while|switch|try|catch|finally|do)\b|->|\?", structure):
+            return set(), []
+        if not mention.search(structure):
+            begin = end + 1
+            continue
+        call = receiver.match(structure)
+        if not call:
+            if re.match(r"\s*return\s+" + re.escape(variable) + r"\s*$", structure):
+                return guards, evidence
+            return set(), []
+        opening = call.end() - 1
+        closing = _closing(structure, opening)
+        # Nested expressions can execute arbitrary mutations; do not certify.
+        if closing < 0:
+            return set(), []
+        name = call.group(1)
+        if name.startswith(('set', 'allow')):
+            if structure[closing + 1:].strip() or re.search(r"[\w$]\s*\(", structure[opening + 1:closing]):
+                return set(), []
+            hits = {key for key, pattern in GUARD_PATTERNS.items()
+                    if pattern.search(statement)}
+            if not hits:
+                # Unknown or reversing configuration cannot establish safety.
+                return set(), []
+            guards.update(hits)
+            evidence.append((begin, end))
+            begin = end + 1
+            continue
+        # Only known consumption operations preserve the established proof.
+        # An unknown call could mutate the object before its eventual use.
+        if name in {"newDocumentBuilder", "newSAXParser", "createXMLStreamReader",
+                    "createXMLEventReader", "newTransformer", "newTemplates",
+                    "newSchema", "newValidator", "newPullParser", "parse",
+                    "build", "read", "unmarshal", "fromXML", "evaluate", "compile"}:
+            return guards, evidence
+        return set(), []
+    return guards, evidence
+
+
+def _helper_xml_guards(body):
+    """Only certify a simple factory returning the very object it configured."""
+    text = "class Helper { public Object factory() {\n" + "\n".join(body[1:-1]) + "\n} }"
+    masked = _structure_mask(text)
+    bounds = list(_web_methods(text))
+    returns = list(re.finditer(r"\breturn\s+(\w+)\s*;", masked))
+    if len(returns) != 1:
+        return set()
+    variable = returns[0].group(1)
+    assignment = re.search(r"\b" + re.escape(variable) + r"\s*=\s*", masked)
+    if not assignment:
+        return set()
+    guards, _ = _xml_guard_evidence(text, masked, bounds, assignment.start(), variable)
+    return guards
+
+
 def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: List[Method],
                  helper_index: Dict[str, Set[str]], root: str,
                  show_hardened: bool,
-                 active_rules: Optional[Sequence[Rule]] = None) -> List[Finding]:
+                 active_rules: Optional[Sequence[Rule]] = None, context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
     is_test = bool(TEST_PATH.search(path)) or path.endswith(("Test.java", "Tests.java", "IT.java"))
     rel = os.path.relpath(path, root) if root else path
 
     findings: List[Finding] = []
+    # Per-file caches: a method's source and guards are immutable during analysis.
+    scope_cache = {}
+    guard_cache = {}
+    candidate_rules = _candidate_rules(lines, active_rules if active_rules is not None else RULES)
+    source_text, source_matches = _source_matches(lines, candidate_rules)
+    source_mask = _structure_mask(source_text)
+    source_bounds = list(_web_methods(source_text))
+    verified_xml_settings = []
     for idx, line in enumerate(lines, start=1):
         raw_line = raw_lines[idx - 1] if idx - 1 < len(raw_lines) else ""
         # Imports mention vulnerable APIs but do not execute them. Rules that
@@ -1638,9 +1713,8 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
 
         # Rule include/exclude filters are resolved once by the CLI. Avoid
         # running regexes for disabled rules on every source line.
-        for rule in (active_rules if active_rules is not None else RULES):
-            if not rule.pattern.search(line):
-                continue
+        for rule, rule_match, match_position, match_source in source_matches.get(idx, ()):
+            # Cross-line matches use the same suppression and report handling.
             if suppressed_rules is not None and rule.rid.upper() in suppressed_rules:
                 continue
             if method_marker_found and (method_suppressed_rules is None or
@@ -1648,17 +1722,24 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
                 continue
 
             var = None
-            m = VAR_ASSIGN.search(line)
+            m = VAR_ASSIGN.search(match_source)
             if m:
                 var = m.group(1)
 
-            scope_lines = lines[meth.start - 1:meth.end] if meth else lines
+            scope_key = (meth.start, meth.end) if meth else None
+            if scope_key not in scope_cache:
+                scope_lines = lines[meth.start - 1:meth.end] if meth else lines
+                scope_cache[scope_key] = (
+                    scope_lines, taint_hints("\n".join(scope_lines)) if meth else [])
+            scope_lines, finding_taint = scope_cache[scope_key]
             # Only use taint as a confidence/severity signal when it occurs in
             # the same method as the sink. File-wide taint made unrelated
             # class annotations and sibling methods look one level worse.
-            finding_taint = taint_hints("\n".join(scope_lines)) if meth else []
             if var:
-                guards = collect_guards(scope_lines, var)
+                guard_key = (scope_key, var)
+                if guard_key not in guard_cache:
+                    guard_cache[guard_key] = collect_guards(scope_lines, var)
+                guards = guard_cache[guard_key].copy()
             elif rule.rid.startswith("SpringSecurityCheck-"):
                 # Spring Security is configured as a builder chain
                 # (http.csrf(...).sessionManagement(...)), so the hardening
@@ -1666,22 +1747,40 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
                 # is. Restricting guard collection to a variable would leave
                 # guards permanently empty here and report every such rule
                 # even on correctly hardened configurations.
-                guards = collect_guards(scope_lines, None)
+                guard_key = (scope_key, None)
+                if guard_key not in guard_cache:
+                    guard_cache[guard_key] = collect_guards(scope_lines, None)
+                guards = guard_cache[guard_key].copy()
             else:
                 guards = set()
 
             # Resolve a helper factory: dbf = XmlUtils.secureFactory();
             via_helper = None
-            rhs = RHS_CALL.search(line)
+            rhs = RHS_CALL.search(match_source)
             if rhs:
                 callee = rhs.group(2)
                 if callee not in ("newInstance", "newFactory") and callee in helper_index:
                     guards |= helper_index[callee]
                     via_helper = callee
 
+            if rule.rid.startswith("XXE-") or rule.rid == "DESER-XSTREAM":
+                initial = helper_index.get(via_helper, set()) if via_helper else set()
+                guards, evidence = _xml_guard_evidence(
+                    source_text, source_mask, source_bounds, match_position, var, initial)
+                verified_xml_settings.extend(evidence)
             status, missing = evaluate(rule, guards)
+            if rule.rid == "HARDEN-XXE-DISALLOW-DOCTYPE" and not any(
+                    start <= match_position < end for start, end in verified_xml_settings):
+                status = "REVIEW"
 
             note = rule.note
+            if rule.rid == "HARDEN-XXE-DISALLOW-DOCTYPE" and status == "REVIEW":
+                note += " Explicit setting only: unconditional protection before parser use was not proven."
+            if rule.rid.startswith("XXE-") and status not in ("HARDENED",):
+                note += " Effective protection before first use was not proven; review ordering and control flow."
+            matched_text = rule_match.group(0).strip()
+            if matched_text and matched_text not in note:
+                note += f" Matched construct: `{matched_text}`."
             if status != "HARDENED" and not var and not rule.always_report and rule.kind == "sink":
                 note += " Used inline without a variable - hardening cannot be detected."
             if via_helper:
@@ -1708,7 +1807,7 @@ def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: Lis
                 guards_found=sorted(guards), guards_missing=missing,
                 taint=finding_taint, note=note.strip(), is_test=is_test,
                 fingerprint=fingerprint(rel, rule.rid, snippet),
-                context=context_lines(raw_lines, idx),
+                context=context_lines(raw_lines, idx, context_radius),
             ))
     return findings
 
@@ -1742,172 +1841,6 @@ def _find_gradle_dep_line(raw_lines: List[str], artifact: str, version: Optional
     return None
 
 
-def analyze_build_file(path: str, root: str) -> List[Finding]:
-    """Analyzes pom.xml, build.gradle(.kts), libs.versions.toml for vulnerable deps."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            content = fh.read()
-    except OSError:
-        return []
-
-    rel = os.path.relpath(path, root) if root else path
-    raw_lines = content.splitlines()
-    found: List[Finding] = []
-    seen: Set[str] = set()
-
-    def line_of(needle: str) -> int:
-        for i, ln in enumerate(raw_lines, start=1):
-            if needle in ln:
-                return i
-        return 1
-
-    # --- property + dependencyManagement expansion for Maven --------------
-    props: Dict[str, str] = {}
-    managed_deps: Dict[str, str] = {}
-    if path.endswith(".xml"):
-        props, managed_deps = maven_resolution_context(path, content)
-
-    def resolve(ver: Optional[str]) -> Optional[str]:
-        if not ver:
-            return None
-        m = MAVEN_PROPERTY_REF.match(ver.strip())
-        if m:
-            return props.get(m.group(1))
-        return ver.strip() if ver.strip() else None
-
-    # --- detect the managed Spring Boot version ---------------------------
-    sb_ver: Optional[str] = None
-    m = SPRING_BOOT_VER.search(content)
-    if m:
-        sb_ver = (m.group(1) or m.group(2) or "").strip()
-
-    def managed_version(artifact: str) -> Optional[str]:
-        # 1) A real <dependencyManagement> entry from this pom or a local
-        #    parent pom - authoritative, so it wins.
-        mv = managed_deps.get(artifact)
-        if mv:
-            resolved = resolve(mv)
-            if resolved:
-                return resolved
-        # 2) Fall back to the small built-in table of Spring Boot managed
-        #    versions. This only covers a handful of artifacts and cannot be
-        #    kept complete by hand, so it is a last resort, not a source of
-        #    truth.
-        if not sb_ver:
-            return None
-        for prefix in sorted(SPRING_BOOT_MANAGED.keys(), reverse=True):
-            if sb_ver.startswith(prefix):
-                return SPRING_BOOT_MANAGED[prefix].get(artifact)
-        return None
-
-    # --- collect (artifact, version) pairs --------------------------------
-    pairs: List[Tuple[str, Optional[str]]] = []
-
-    if path.endswith(".xml"):
-        # <dependencyManagement> only pins versions for other modules - it is
-        # not a dependency of this module. Its entries are still used for
-        # version resolution above (managed_version), but must not be counted
-        # as dependencies here: otherwise a parent pom reports its managed
-        # versions AND every child reports the same artifact again, and the
-        # static rules would disagree with the OSV path on the same file.
-        dep_body = _MAVEN_DEPMGMT_BLOCK.sub("", content)
-        for a, v in MAVEN_DEP.findall(dep_body):
-            pairs.append((a, resolve(v)))
-        known = {a for a, _ in pairs}
-        for a in MAVEN_ARTIFACT_ONLY.findall(dep_body):
-            if a not in known:
-                pairs.append((a, managed_version(a)))
-
-    elif path.endswith(".toml"):
-        # libs.versions.toml: build a version table
-        ver_map: Dict[str, str] = {k: v for k, v in TOML_VERSION.findall(content)}
-        for _alias, grp, art, ver_ref in TOML_LIB.findall(content):
-            resolved = ver_map.get(ver_ref, ver_ref)
-            pairs.append((art, resolved if not ver_ref.startswith("[") else None))
-
-    else:  # build.gradle / build.gradle.kts
-        # standard "group:artifact:version"
-        for _, a, v in GRADLE_DEP.findall(content):
-            pairs.append((a, v))
-        # Kotlin DSL version { strictly(...) }
-        for _, a, v in GRADLE_VERSION_BLOCK.findall(content):
-            pairs.append((a, v))
-        # constraints block
-        for _, a, v in GRADLE_CONSTRAINT.findall(content):
-            pairs.append((a, v))
-        # resolve gradle.properties variables
-        gprops_path = os.path.join(os.path.dirname(path), "gradle.properties")
-        gprops: Dict[str, str] = {}
-        if os.path.isfile(gprops_path):
-            try:
-                for gl in open(gprops_path, encoding="utf-8", errors="replace"):
-                    m2 = re.match(r"^([\w.]+)\s*=\s*(\S+)", gl.strip())
-                    if m2:
-                        gprops[m2.group(1)] = m2.group(2)
-            except OSError:
-                pass
-        pairs = [(a, gprops.get(v.strip("${}"), v) if v and v.startswith("$") else v)
-                 for a, v in pairs]
-
-    # --- compare against DEP_RULES ----------------------------------------
-    for artifact, version in pairs:
-        for dep in DEP_RULES:
-            if artifact.lower() != dep.artifact.lower():
-                continue
-            key = f"{artifact}:{version}"
-            if key in seen:
-                continue
-            seen.add(key)
-            if dep.fixed and version and not is_older(version, dep.fixed):
-                continue
-            status = "VULNERABLE" if (dep.fixed and version) else "REVIEW"
-            note = dep.note
-            if dep.fixed:
-                note += f" Fixed from {dep.fixed}."
-            if not version:
-                note += " Version not directly determinable (property/BOM/catalog) - check manually."
-            if sb_ver and not version:
-                mv = managed_version(artifact)
-                if mv:
-                    note += f" Spring Boot {sb_ver} provides {artifact}:{mv}."
-            sev = dep.severity if status == "VULNERABLE" else bump(dep.severity, -1)
-
-            # Show the real declaration (not just "artifact:version") and a
-            # concrete, copy-pasteable fix wherever the file lets us build one.
-            line_no = line_of(artifact)
-            snippet = f"{artifact}:{version or '?'}"
-            fix_text = f"Upgrade {artifact} to {dep.fixed} or later." if dep.fixed else ""
-
-            if path.endswith(".xml"):
-                block = _find_maven_dep_block(content, artifact)
-                if block:
-                    block_text, offset = block
-                    snippet = block_text.strip("\n")
-                    line_no = content.count("\n", 0, offset) + 1
-                    if dep.fixed:
-                        fixed_block = re.sub(
-                            r"(<version>\s*)[^<]+(\s*</version>)",
-                            lambda mo: mo.group(1) + dep.fixed + mo.group(2),
-                            block_text, count=1)
-                        fix_text = ("Bump the <version> to " + dep.fixed +
-                                   " or later:\n\n" + fixed_block.strip("\n"))
-            elif path.endswith((".gradle", ".kts", ".toml")):
-                ln = _find_gradle_dep_line(raw_lines, artifact, version)
-                if ln:
-                    line_text, line_no = ln
-                    snippet = line_text
-                    if dep.fixed and version and version in line_text:
-                        fix_text = ("Bump the version to " + dep.fixed +
-                                   " or later:\n\n" +
-                                   line_text.replace(version, dep.fixed))
-
-            found.append(Finding(
-                file=rel, line=line_no, rule_id=f"DEP-{artifact.upper()}",
-                rule_name=f"Dependency {artifact}", severity=sev, status=status,
-                code=snippet, note=note, fix=fix_text,
-                fingerprint=fingerprint(rel, f"DEP-{artifact.upper()}", f"{artifact}:{version or '?'}"),
-            ))
-    return found
 
 
 # --------------------------------------------------------------------------
@@ -1936,84 +1869,11 @@ _MAVEN_ARTIFACT_RE = re.compile(r"<artifactId>\s*([^<\s]+)\s*</artifactId>")
 _MAVEN_VERSION_RE = re.compile(r"<version>\s*([^<\s]+)\s*</version>")
 
 
-def _osv_ecosystem_triples(path: str, content: str) -> List[Tuple[str, str, str]]:
-    """Returns (groupId, artifactId, version) triples for one build file, with
-    Maven <properties> and Gradle version-catalog references resolved the
-    same way analyze_build_file does. Covers:
-      - Maven pom.xml <dependency> blocks
-      - Gradle build.gradle/.kts inline 'group:artifact:version' strings
-      - Gradle Kotlin DSL version { strictly/require/prefer(...) } blocks
-      - Gradle constraints { } blocks
-      - Gradle version catalogs (libs.versions.toml) - the default in
-        current Gradle projects, previously not checked against OSV at all
-    """
-    triples: List[Tuple[str, str, str]] = []
-    valid_version = lambda v: v and not re.search(r"\$\{|\+|latest|SNAPSHOT", v, re.I)  # noqa: E731
-
-    if path.endswith(".xml"):
-        props, managed = maven_resolution_context(path, content)
-
-        def resolve(v: str) -> Optional[str]:
-            m = MAVEN_PROPERTY_REF.match(v.strip())
-            if m:
-                return props.get(m.group(1))
-            return v.strip() or None
-
-        # Skip the <dependencyManagement> section itself: those entries declare
-        # versions for other modules, they are not dependencies of this module.
-        body = _MAVEN_DEPMGMT_BLOCK.sub("", content)
-        for block_m in _MAVEN_DEPENDENCY_BLOCK_RE.finditer(body):
-            block = block_m.group(0)
-            g, a, v = _MAVEN_GROUP_RE.search(block), _MAVEN_ARTIFACT_RE.search(block), _MAVEN_VERSION_RE.search(block)
-            if not (g and a):
-                continue
-            if v:
-                ver = resolve(v.group(1))
-            else:
-                # No <version> here - take it from dependencyManagement (this
-                # pom or a local parent). Previously such entries had no
-                # version and were dropped, i.e. never checked at all.
-                mv = managed.get(f"{g.group(1)}:{a.group(1)}") or managed.get(a.group(1))
-                ver = resolve(mv) if mv else None
-            if valid_version(ver):
-                triples.append((g.group(1), a.group(1), ver))
-
-    elif path.endswith((".gradle", ".kts")):
-        seen: Set[Tuple[str, str]] = set()
-        for g, a, v in (list(GRADLE_DEP.findall(content))
-                       + list(GRADLE_VERSION_BLOCK.findall(content))
-                       + list(GRADLE_CONSTRAINT.findall(content))):
-            if valid_version(v) and (g, a) not in seen:
-                seen.add((g, a))
-                triples.append((g, a, v))
-
-    elif path.endswith(".toml"):
-        # Gradle version catalog: [versions] table + [libraries] entries that
-        # reference it via version.ref (the standard modern Gradle layout).
-        ver_map: Dict[str, str] = dict(TOML_VERSION.findall(content))
-        for _alias, group, artifact, ver_ref in TOML_LIB.findall(content):
-            version = ver_map.get(ver_ref, ver_ref)
-            if valid_version(version) and not version.startswith(("[", "{")):
-                triples.append((group, artifact, version))
-
-    return triples
 
 
 _MAVEN_VERSION_QUALIFIER_RE = re.compile(r"\.(RELEASE|Final|GA|RC\d*|SP\d*)$", re.I)
 
 
-def _normalize_maven_version_for_osv(version: str) -> str:
-    """Strips common non-semver Maven qualifiers (.RELEASE, .Final, .GA, .RC1,
-    .SP1) before sending a version to osv.dev's query API.
-
-    OSV's version-range comparator expects roughly semver-shaped versions; a
-    real-world Maven version like '4.2.12.RELEASE' may not be recognized as
-    falling inside a vulnerable range expressed in plain numeric form, causing
-    a false "not affected" instead of an error - it looks identical to a
-    clean result, which is worse than an explicit failure. The ORIGINAL
-    version is still used for the report and the cache key; only the string
-    sent to OSV is normalized."""
-    return _MAVEN_VERSION_QUALIFIER_RE.sub("", version)
 
 
 @dataclass(frozen=True)
@@ -2052,11 +1912,18 @@ def parse_gradle_dependency_output(output: str, build_file: str) -> List[Resolve
     coordinate = re.compile(
         r"(?:^|\s)([\w.-]+):([\w.-]+):([^\s()]+)(?:\s+->\s+([^\s()]+))?")
     for raw in output.splitlines():
+        if re.search(r"\bFAILED\b|\(n\)", raw):
+            continue
         match = coordinate.search(raw)
         if not match or match.group(1) == "project":
             continue
         version = match.group(4) or match.group(3)
         if version in {"FAILED", "unspecified"} or version.startswith("{"):
+            continue
+        if ":" in version:
+            replacement = version.split(":")
+            if len(replacement) == 3:
+                found.add(tuple(replacement))
             continue
         found.add((match.group(1), match.group(2), version))
     return [ResolvedDependency(build_file, g, a, v, "gradle")
@@ -2130,6 +1997,9 @@ def resolve_project_dependencies(build_files: Sequence[str], root: str,
             tail = " ".join(combined.splitlines()[-3:])[:500]
             errors.append(f"{rel}: {kind} exited {proc.returncode}: {tail}")
             continue
+        if kind == "gradle" and re.search(r"\bFAILED\b|\(n\)", combined):
+            errors.append(f"{rel}: Gradle dependency graph is incomplete (unresolved entries)")
+            continue
         parsed = (parse_maven_dependency_output(combined, build_file) if kind == "maven"
                   else parse_gradle_dependency_output(combined, build_file))
         if not parsed:
@@ -2140,25 +2010,6 @@ def resolve_project_dependencies(build_files: Sequence[str], root: str,
     return list(unique.values()), errors
 
 
-def analyze_resolved_dependencies(dependencies: Sequence[ResolvedDependency],
-                                  root: str) -> List[Finding]:
-    """Apply the built-in version rules to effective/transitive coordinates."""
-    out: List[Finding] = []
-    for item in dependencies:
-        for rule in DEP_RULES:
-            if item.artifact != rule.artifact or not rule.fixed or not is_older(item.version, rule.fixed):
-                continue
-            rel = os.path.relpath(item.build_file, root) if root else item.build_file
-            identity = f"{item.artifact}:{item.version}"
-            out.append(Finding(
-                file=rel, line=1, rule_id=f"DEP-{item.artifact.upper()}",
-                rule_name=f"Resolved dependency {item.artifact}",
-                severity=rule.severity, status="VULNERABLE", code=identity,
-                note=f"Effective {item.resolver} runtime graph resolves {item.group}:{identity}. "
-                     f"{rule.note} Fixed from {rule.fixed}.",
-                fix=f"Change dependency constraints so the effective version is {rule.fixed} or later.",
-                fingerprint=fingerprint(rel, f"DEP-{item.artifact.upper()}", identity)))
-    return out
 
 
 RESOLVED_COMBINATION_RULES = {
@@ -2241,59 +2092,6 @@ def analyze_resolved_combinations(dependencies: Sequence[ResolvedDependency], ro
     return out
 
 
-def osv_query_online(group: str, artifact: str, version: str,
-                     timeout: float = 8.0, retries: int = 3) -> Tuple[Optional[dict], Optional[str]]:
-    """A single live query to osv.dev. Returns (response, None) on success, or
-    (None, error_message) on any network/HTTP/parse error - the caller can
-    then tell a real failure apart from "no vulnerabilities found", and show
-    the user what actually went wrong instead of silently reporting zero.
-
-    Retries with exponential backoff on rate limiting (429) and transient
-    server errors (5xx). This matters because the queries run in parallel: a
-    burst of concurrent requests is exactly what makes a public API push back,
-    and without a retry every package would fail at once and produce an empty
-    cache that looks indistinguishable from "nothing found".
-    """
-    import urllib.request
-    import urllib.error
-    import time
-
-    body = json.dumps({
-        "version": version,
-        "package": {"name": f"{group}:{artifact}", "ecosystem": "Maven"},
-    }).encode("utf-8")
-
-    last_error = "unknown error"
-    for attempt in range(retries):
-        req = urllib.request.Request(
-            OSV_API_QUERY_URL, data=body,
-            headers={"Content-Type": "application/json",
-                     "User-Agent": f"JSpringGuard/{VERSION}"},
-            method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8")), None
-        except urllib.error.HTTPError as exc:
-            try:
-                detail = exc.read().decode("utf-8", errors="replace")[:200]
-            except Exception:
-                detail = ""
-            last_error = f"HTTP {exc.code} {exc.reason}" + (f" - {detail}" if detail else "")
-            # 429 = rate limited, 5xx = transient server-side problem: worth retrying.
-            if exc.code == 429 or 500 <= exc.code < 600:
-                if attempt < retries - 1:
-                    time.sleep(1.5 * (2 ** attempt))
-                    continue
-            return None, last_error
-        except urllib.error.URLError as exc:
-            last_error = f"connection failed: {exc.reason}"
-        except TimeoutError:
-            last_error = "timed out"
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            return None, f"{type(exc).__name__}: {exc}"
-        if attempt < retries - 1:
-            time.sleep(1.5 * (2 ** attempt))
-    return None, last_error
 
 
 _CVSS3_AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
@@ -2388,7 +2186,9 @@ def osv_check_build_files(build_files: List[str], root: str,
                           cache_read: Optional[Dict[str, dict]],
                           cache_write: Optional[Dict[str, dict]],
                           jobs: int = 8,
-                          resolved: Sequence[ResolvedDependency] = ()) -> Tuple[List["Finding"], int, int, int, Optional[str]]:
+                          resolved: Sequence[ResolvedDependency] = (),
+                          diagnostics: Optional[dict] = None,
+                          offline_db=None) -> Tuple[List["Finding"], int, int, int, Optional[str]]:
     """Runs the OSV check across the given build files.
 
     cache_read (if not None): look packages up ONLY here - no network call is
@@ -2404,13 +2204,16 @@ def osv_check_build_files(build_files: List[str], root: str,
     I/O, so this is a straightforward, safe speed-up.
 
     Returns (findings, occurrences_checked, unique_packages_checked,
-    packages_failed, first_error). packages_failed/first_error let the caller
+    packages_failed, first_error). Only attempted lookups count as failures.
+    Optional diagnostics separately records skipped unresolved declarations and
+    whether coverage is incomplete. packages_failed/first_error let the caller
     distinguish "OSV genuinely found nothing" from "every query failed" (no
     real internet access, a proxy/firewall, or osv.dev being unreachable) -
     both look identical from the finding count alone otherwise.
     """
     # Pass 1: collect every (file, group, artifact, version) occurrence.
     occurrences: List[Tuple[str, str, str, str]] = []
+    unresolved = []
     build_contents: Dict[str, Tuple[str, List[str]]] = {}
     resolved_files = {os.path.abspath(d.build_file) for d in resolved}
     for bf in build_files:
@@ -2422,10 +2225,15 @@ def osv_check_build_files(build_files: List[str], root: str,
         rel = os.path.relpath(bf, root) if root else bf
         build_contents[rel] = (content, content.splitlines())
         if os.path.abspath(bf) not in resolved_files:
+            unresolved.extend(f"{rel}: {row.group}:{row.artifact}" for row in _dependency_declarations(bf, content)
+                              if not _coordinate_known(row.group, row.artifact) or row.reason or not _osv_version_is_concrete(row.version))
             for group, artifact, version in _osv_ecosystem_triples(bf, content):
                 occurrences.append((rel, group, artifact, version))
     for item in resolved:
         rel = os.path.relpath(item.build_file, root) if root else item.build_file
+        if not _osv_version_is_concrete(item.version):
+            unresolved.append(f"{rel}: {item.group}:{item.artifact}")
+            continue
         occurrences.append((rel, item.group, item.artifact, item.version))
     occurrences = list(dict.fromkeys(occurrences))
 
@@ -2436,13 +2244,26 @@ def osv_check_build_files(build_files: List[str], root: str,
         unique.setdefault(key, (group, artifact, version))
 
     results: Dict[str, Optional[dict]] = {}
+    unresolved = list(dict.fromkeys(unresolved))
     failed = 0
     first_error: Optional[str] = None
 
-    if cache_read is not None:
+    lookup_errors = {}
+    if offline_db is not None:
+        for key, (group, artifact, version) in unique.items():
+            data, err = offline_db.query(group, artifact, version)
+            results[key] = data
+            if err is not None:
+                failed += 1
+                lookup_errors[key] = err
+                if first_error is None:
+                    first_error = f"{key}: {err}"
+    elif cache_read is not None:
         for key in unique:
             cached = cache_read.get(key)
-            if isinstance(cached, dict):
+            if (isinstance(cached, dict) and not cached.get("next_page_token")
+                    and isinstance(cached.get("vulns", []), list)
+                    and all(isinstance(v, dict) for v in cached.get("vulns", []))):
                 results[key] = cached
             else:
                 results[key] = None
@@ -2474,14 +2295,25 @@ def osv_check_build_files(build_files: List[str], root: str,
                 failed += 1
                 if first_error is None:
                     first_error = f"{key}: {err}"
-            if cache_write is not None and data is not None:
-                cache_write[key] = data
+            if cache_write is not None:
+                if err is None and data is not None:
+                    cache_write[key] = data
+                else:
+                    # A failed refresh must not leave a stale success behind.
+                    cache_write.pop(key, None)
 
     # Pass 3: expand the (deduplicated) results back out to every occurrence,
     # so each build file still gets its own finding for a shared dependency.
     out: List[Finding] = []
     for rel, group, artifact, version in occurrences:
-        data = results.get(f"{group}:{artifact}@{version}")
+        lookup_key = f"{group}:{artifact}@{version}"
+        if lookup_key in lookup_errors:
+            out.append(Finding(file=rel, line=1, rule_id="OSV-OFFLINE-UNRESOLVED",
+                               rule_name="Offline advisory assessment incomplete", severity="MEDIUM",
+                               status="REVIEW", code=lookup_key, note=lookup_errors[lookup_key],
+                               fix="Review the listed advisory ranges; no safe-version conclusion was reached.",
+                               fingerprint=fingerprint(rel, "OSV-OFFLINE-UNRESOLVED", lookup_key)))
+        data = results.get(lookup_key)
         if not data:
             continue
         # OSV frequently returns several records describing the SAME issue -
@@ -2519,6 +2351,8 @@ def osv_check_build_files(build_files: List[str], root: str,
                     code, line_no = declaration
             aliases = [a for a in (v.get("aliases") or []) if a != vid]
             note = summary or f"See https://osv.dev/vulnerability/{vid}"
+            if offline_db is not None:
+                note += " Offline Maven snapshot: " + offline_db.metadata.get("created_utc", "unknown") + "."
             if aliases:
                 note += f" (also known as {', '.join(aliases[:3])})"
             out.append(Finding(
@@ -2528,6 +2362,10 @@ def osv_check_build_files(build_files: List[str], root: str,
                 note=note,
                 fix=f"Check {vid} at https://osv.dev/vulnerability/{vid} for the fixed version(s).",
                 fingerprint=fingerprint(rel, f"OSV-{vid}", snippet)))
+    if diagnostics is not None:
+        diagnostics.update(unresolved=unresolved, successful=len(unique) - failed,
+                           failed=failed, attempted=len(unique),
+                           incomplete=bool(failed or unresolved))
     return out, len(occurrences), len(unique), failed, first_error
 
 
@@ -2620,6 +2458,7 @@ def colorize(text: str, key: str, enabled: bool) -> str:
 
 
 _VULN_CATEGORY_RULES: List[Tuple[str, str]] = [
+    ("HARDEN-", "Hardening"),
     ("XXE-", "XXE"), ("ANTI-", "XXE"),
     ("DESER-", "Deserialization"), ("SRC-DESER", "Deserialization"),
     ("SRC-FASTJSON", "Deserialization"),
@@ -3199,10 +3038,12 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
                      + (f" &middot; {esc(f.method)}()" if f.method else "") + "</div>")
         if f.code or f.context:
             rows = []
+            width = len(str(f.context[-1][0])) if f.context else 0
             for n, line in f.context:
                 marker = ">" if n == f.line else " "
                 cls = " class='context-hit'" if n == f.line else ""
-                rows.append(f"<span{cls}>{esc(marker + ' ' + str(n) + ' | ' + line)}</span>")
+                num = str(n).rjust(width)
+                rows.append(f"<span{cls}>{esc(marker + ' ' + num + ' | ' + line)}</span>")
             rendered = "\n".join(rows) if rows else esc(f.code)
             parts.append(f"<pre class='source-context'>{rendered}</pre>")
         if f.guards_found:
@@ -3602,15 +3443,16 @@ def run_selftest() -> int:
     checks: List[Tuple[str, bool]] = [
         # XXE
         ("Vulnerable.java detected", status_of("Vulnerable.java") == ["VULNERABLE"]),
-        ("Safe.java marked as hardened", status_of("Safe.java") == ["HARDENED"]),
+        ("Safe.java marked as hardened",
+         status_of("Safe.java") == ["HARDENED", "HARDENED"]),
         ("Method scope separates safe/unsafe",
-         sorted(status_of("MethodScope.java")) == ["HARDENED", "VULNERABLE"]),
+         sorted(status_of("MethodScope.java")) == ["HARDENED", "HARDENED", "VULNERABLE"]),
         ("Helper factory resolved", status_of("UsesHelper.java") == ["HARDENED"]),
         ("Suppression applies", status_of("Suppressed.java") == []),
-        ("dom4j 2.1.1 detected as vulnerable",
-         any(f.rule_id == "DEP-DOM4J" and f.status == "VULNERABLE" for f in findings)),
-        ("XStream 1.4.10 detected as vulnerable",
-         any(f.rule_id == "DEP-XSTREAM" and f.status == "VULNERABLE" for f in findings)),
+        ("dom4j 2.1.1 flagged for dependency review",
+         any(f.rule_id == "DEP-DOM4J" and f.status == "REVIEW" for f in findings)),
+        ("XStream 1.4.10 flagged for dependency review",
+         any(f.rule_id == "DEP-XSTREAM" and f.status == "REVIEW" for f in findings)),
         # Spring Security
         ("SpringSecurityCheck-CSRF-DISABLED detected (bad config)",
          has_rule("SecurityConfigBad.java", "SpringSecurityCheck-CSRF-DISABLED")),
@@ -3620,10 +3462,10 @@ def run_selftest() -> int:
          has_rule("SecurityConfigBad.java", "SpringSecurityCheck-NOOP-ENCODER")),
         ("SpringSecurityCheck-REMEMBERME-NO-KEY detected",
          has_rule("SecurityConfigBad.java", "SpringSecurityCheck-REMEMBERME-NO-KEY")),
-        ("spring-security-web 5.6.0 detected as vulnerable",
-         any(f.rule_id == "DEP-SPRING-SECURITY-WEB" and f.status == "VULNERABLE" for f in findings)),
-        ("nimbus-jose-jwt 9.10 detected as vulnerable",
-         any(f.rule_id == "DEP-NIMBUS-JOSE-JWT" and f.status == "VULNERABLE" for f in findings)),
+        ("spring-security-web 5.6.0 flagged for dependency review",
+         any(f.rule_id == "DEP-SPRING-SECURITY-WEB" and f.status == "REVIEW" for f in findings)),
+        ("nimbus-jose-jwt 9.10 flagged for dependency review",
+         any(f.rule_id == "DEP-NIMBUS-JOSE-JWT" and f.status == "REVIEW" for f in findings)),
         ("SpringSecurityCheck-PROP-ACTUATOR-ALL detected",
          has_rule("application.properties", "SpringSecurityCheck-PROP-ACTUATOR-ALL")),
         ("SpringSecurityCheck-PROP-SHUTDOWN detected",
@@ -3749,19 +3591,25 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
             _, raw_lines, lines, methods = data
             loaded[p] = (lines, methods)
             raw_map[p] = raw_lines
+    results.clear()
     helper_index = build_helper_index(loaded)
     findings: List[Finding] = []
     for p, (lines, methods) in loaded.items():
         findings.extend(analyze_file(p, raw_map[p], lines, methods, helper_index, root,
-                                     show_hardened, active_rules))
+                                     show_hardened, active_rules, context_radius))
         if p.endswith((".java", ".kt")):
             rel = os.path.relpath(p, root) if root else p
             text = "\n".join(lines)
             extra = []
+            method_bounds = list(_web_methods(text))
             for analyzer in (analyze_spel_from_request, analyze_ldap_injection,
                              analyze_log_injection, analyze_sqli_var_concat,
                              analyze_web_source, analyze_structured_dataflow):
-                extra.extend(analyzer(rel, text))
+                if analyzer in (analyze_web_source, analyze_structured_dataflow):
+                    extra.extend(analyzer(rel, text, context_radius=context_radius,
+                                          method_bounds=method_bounds))
+                else:
+                    extra.extend(analyzer(rel, text, context_radius=context_radius))
             findings.extend(f for f in extra if not finding_suppressed(raw_map[p], f))
     for p in template_files:
         try:
@@ -3770,7 +3618,7 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
         except OSError:
             continue
         rel = os.path.relpath(p, root) if root else p
-        findings.extend(f for f in analyze_template(rel, "\n".join(raw_map[p]))
+        findings.extend(f for f in analyze_template(rel, "\n".join(raw_map[p]), context_radius=context_radius)
                         if not finding_suppressed(raw_map[p], f))
     if with_deps:
         # The nearest inventoried POM owns a source file; sibling modules cannot
@@ -3839,6 +3687,30 @@ def auto_osv_cache_path(root: str) -> str:
     return f"osv-cache-{base}-{ts}.json"
 
 
+def _recover_windows_quoted_path(p: str) -> str:
+    """Recovers from the classic Windows cmd.exe/PowerShell quoting bug.
+
+    A single trailing backslash right before a closing double-quote (e.g.
+    "C:\\ordner\\") is not treated as ending the path: the CRT argv parser
+    Windows uses treats an odd run of backslashes before a '"' as an escaped,
+    literal quote character rather than a delimiter - so quoted-mode never
+    closes and a stray '"' ends up embedded in the argument (and, with more
+    arguments after it, the rest of the command line gets swallowed into the
+    same argument too). The visible symptom is a path that silently doesn't
+    exist - no crash, no findings, no error - while the same path without
+    the trailing backslash works fine.
+
+    If the path as given doesn't exist but stripping one trailing '"' does,
+    this recovers the intended path automatically. Anything else is returned
+    unchanged; the caller reports it as missing.
+    """
+    if p and p.endswith('"') and not os.path.exists(p):
+        stripped = p[:-1]
+        if os.path.exists(stripped):
+            return stripped
+    return p
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="JSpringGuard: XXE + Spring Security for JVM source code (v%s), "
@@ -3850,12 +3722,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--ext", default=",".join(DEFAULT_EXTS), help="Extensions, comma-separated")
     ap.add_argument("--exclude", default="", help="Additional directories, comma-separated")
     ap.add_argument("--skip-tests", action="store_true", help="Skip test directories")
-    ap.add_argument("--show-hardened", action="store_true", help="Also list hardened locations")
+    ap.add_argument("--show-hardened", action="store_true", default=True,
+                    help="List hardened/good-practice locations too (default: on; kept for "
+                         "compatibility with scripts that already pass it)")
+    ap.add_argument("--hide-hardened", action="store_true",
+                    help="Suppress hardened/good-practice findings (undo the --show-hardened default)")
     ap.add_argument("--no-deps", action="store_true", help="Skip the dependency check")
     ap.add_argument("--resolve-deps", action="store_true",
                     help="Opt in to Maven/Gradle runtime dependency resolution; executes the project wrapper/build")
     ap.add_argument("--resolver-timeout", type=int, default=180, metavar="SECONDS",
                     help="Timeout per Maven/Gradle module for --resolve-deps (default 180)")
+    ap.add_argument("--osv-db", metavar="FILE", help="Scan against a complete local Maven SQLite snapshot; no network access")
+    ap.add_argument("--osv-db-update", metavar="FILE", help="Download the complete official Maven OSV export and atomically create/update FILE; then exit")
+    ap.add_argument("--osv-db-build", metavar="ZIP", help="Import a local Maven OSV ZIP into --osv-db FILE; then exit without network access")
+    ap.add_argument("--osv-db-info", metavar="FILE", help="Print local OSV database metadata and exit")
     ap.add_argument("--check-osv", action="store_true",
                     help="Check dependencies against osv.dev, live. Always writes a local "
                          "cache file afterwards (see --osv-cache-write) for later offline reuse.")
@@ -3893,12 +3773,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--version", action="version",
                     version=f"JSpringGuard {VERSION} by {AUTHOR} - {REPO_URL}")
     args = ap.parse_args(argv)
+    db_commands = sum(bool(x) for x in (args.osv_db_update, args.osv_db_build, args.osv_db_info))
+    if db_commands > 1:
+        ap.error("Use only one database management command at a time")
+    if args.osv_db_build and not args.osv_db:
+        ap.error("--osv-db-build ZIP requires --osv-db FILE")
+    if (args.osv_db or db_commands) and (args.osv_cache_read or args.osv_cache_write):
+        ap.error("A complete OSV database and a per-query cache are different modes; do not combine them")
+    if args.osv_db and not args.osv_db_build and (args.no_deps or args.resolve_deps):
+        ap.error("--osv-db cannot combine with --no-deps or --resolve-deps; offline scans must not execute network-capable build tools")
+    if db_commands:
+        try:
+            if args.osv_db_info:
+                db = OfflineOsvDatabase(args.osv_db_info)
+                try:
+                    metadata = db.metadata
+                finally:
+                    db.close()
+            elif args.osv_db_build:
+                metadata = build_osv_database(args.osv_db_build, args.osv_db)
+            else:
+                print("[osv-db] Downloading the Java OSV database for Maven and Gradle projects...", file=sys.stderr)
+                metadata = update_osv_database(args.osv_db_update)
+            print(json.dumps(metadata, indent=2))
+            return 0
+        except offline_database_error_types() as exc:
+            print(f"[osv-db] {exc}", file=sys.stderr)
+            return 2
+    if args.osv_db:
+        args.check_osv = True
     if args.context < 0:
         ap.error("--context must be non-negative")
     if args.resolver_timeout < 1:
         ap.error("--resolver-timeout must be positive")
     if args.resolve_deps and args.no_deps:
         ap.error("--resolve-deps cannot be combined with --no-deps")
+    if args.hide_hardened:
+        args.show_hardened = False
 
     print(f"JSpringGuard v{VERSION} by {AUTHOR} - {REPO_URL}", file=sys.stderr)
     include_rules = parse_rule_patterns(args.include_rule)
@@ -3926,6 +3837,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_selftest()
     if not args.paths:
         ap.error("Please provide at least one path (or --selftest / --fix / --poc).")
+
+    args.paths = [_recover_windows_quoted_path(p) for p in args.paths]
+    missing = [p for p in args.paths if not os.path.exists(p)]
+    if missing:
+        for p in missing:
+            hint = ""
+            if p.endswith('"') or p.endswith("\\"):
+                hint = (" (on Windows, a quoted path that ends in a single backslash, e.g. "
+                        '"C:\\ordner\\", is misparsed by cmd.exe/PowerShell: that backslash '
+                        "escapes the closing quote instead of ending the path, so the rest of "
+                        "the command line gets absorbed into it. Drop the trailing backslash "
+                        "(C:\\ordner), double it (C:\\ordner\\\\), or pass the path unquoted.)")
+            print(f"[error] path not found: {p}{hint}", file=sys.stderr)
+        return 2
 
     exts = tuple(e if e.startswith(".") else "." + e
                  for e in (x.strip() for x in args.ext.split(",")) if e)
@@ -3983,7 +3908,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.check_osv:
         cache_read: Optional[Dict[str, dict]] = None
         cache_write: Optional[Dict[str, dict]] = None
-        if args.osv_cache_read:
+        local_database = None
+        if args.osv_db:
+            try:
+                local_database = OfflineOsvDatabase(args.osv_db)
+                print("[osv-db] Local Java database for Maven and Gradle projects", file=sys.stderr)
+                print(f"[osv-db] {int(local_database.metadata['advisories']):,} advisories | "
+                      f"{int(local_database.metadata['packages']):,} packages | Offline mode", file=sys.stderr)
+                print(f"[osv-db] Snapshot: {local_database.metadata.get('created_utc')}", file=sys.stderr)
+            except offline_database_error_types() as exc:
+                print(f"[osv-db] Cannot open database: {exc}", file=sys.stderr)
+                return 2
+        elif args.osv_cache_read:
             # Read-only mode: report from the local file, no network call, and
             # nothing is written back - there is nothing new to save.
             try:
@@ -4010,39 +3946,34 @@ def main(argv: Optional[List[str]] = None) -> int:
                         cache_write.update(json.load(fh))
                 except (OSError, ValueError):
                     pass
-        osv_findings, osv_occurrences, osv_unique, osv_failed, osv_first_error = osv_check_build_files(
-            osv_build_files, root, cache_read, cache_write, jobs=max(1, args.jobs),
-            resolved=resolved_dependencies)
-        osv_incomplete = osv_failed > 0
+        osv_diagnostics = {}
+        try:
+            osv_findings, osv_occurrences, osv_unique, osv_failed, osv_first_error = osv_check_build_files(
+                osv_build_files, root, cache_read, cache_write, jobs=max(1, args.jobs),
+                resolved=resolved_dependencies, diagnostics=osv_diagnostics, offline_db=local_database)
+        except offline_database_error_types() as exc:
+            print(f"[osv] Assessment failed: {exc}", file=sys.stderr)
+            return 2
+        finally:
+            if local_database is not None:
+                local_database.close()
+        osv_incomplete = osv_diagnostics["incomplete"]
         enrich_context(osv_findings, root, args.context)
         findings.extend(osv_findings)
-        dedupe_note = (f" ({osv_occurrences} occurrence(s) across build files)"
-                      if osv_occurrences != osv_unique else "")
-        print(f"[osv] Checked {osv_unique} unique package(s){dedupe_note}, "
-             f"{len(osv_findings)} advisory(ies) found.", file=sys.stderr)
-        if osv_failed:
-            print(f"[osv] WARNING: {osv_failed}/{osv_unique} quer{'y' if osv_failed == 1 else 'ies'} "
-                 f"failed - the {len(osv_findings)} figure above is INCOMPLETE, not a clean scan. "
-                 f"First error: {osv_first_error}", file=sys.stderr)
-            if osv_failed == osv_unique:
-                if cache_read is not None:
-                    print("[osv] The offline cache covers none of the resolved packages; "
-                          "refresh or replace it before treating this scan as clean.", file=sys.stderr)
-                else:
-                    print("[osv] Every single query failed - this points to no real internet access, "
-                         "a proxy/firewall blocking api.osv.dev, or an SSL/certificate problem, not "
-                         "\"no vulnerabilities found\". Check connectivity, e.g.:\n"
-                         "        curl -s https://api.osv.dev/v1/query -d '{\"version\":\"2.9.1\","
-                         "\"package\":{\"name\":\"org.apache.logging.log4j:log4j-core\","
-                         "\"ecosystem\":\"Maven\"}}'", file=sys.stderr)
+        print_osv_summary(len(osv_findings), osv_occurrences, osv_unique,
+                          osv_failed, osv_first_error, osv_diagnostics,
+                          offline=cache_read is not None, database=local_database is not None)
         if cache_write is not None:
             try:
                 with open(args.osv_cache_write, "w", encoding="utf-8") as fh:
                     json.dump(cache_write, fh, indent=2)
                 abs_cache = os.path.abspath(args.osv_cache_write)
-                print(f"[osv] Cache written: {abs_cache} ({len(cache_write)} package(s)) "
+                print(f"[osv] Cache written: {abs_cache} ({len(cache_write)} total cached package(s); "
+                     f"{osv_diagnostics['successful']} refreshed in this run) "
                      f"- copy this file to the air-gapped machine and use --check-osv-read there.",
                      file=sys.stderr)
+                if osv_incomplete:
+                    print("[osv] The cache does not cover skipped dependencies or failed lookups.", file=sys.stderr)
             except OSError as exc:
                 print(f"[osv] Cannot write cache file: {exc}", file=sys.stderr)
     if not n_src and not n_build and not findings:
@@ -4391,6 +4322,97 @@ MERGE_SRC_RULES: List[Rule] = [
          fix="Require client certificates at the TLS layer, use a restricted trust store, and configure an explicit subject principal mapping."),
 ]
 
+# --- 2b) positive hardening measures ---------------------------------------
+# Unlike the sink/antipattern rules above, these do not describe a risk that
+# then gets judged as guarded or not. The pattern match itself IS the good
+# practice - it is reported (kind="hardening" -> always HARDENED/INFO, see
+# evaluate()) whether or not anything risky is nearby in the same file. Shown
+# with --show-hardened, same as any other HARDENED finding.
+HARDENING_RULES: List[Rule] = [
+    Rule("HARDEN-BCRYPT-STRENGTH", "BCryptPasswordEncoder with an explicit work factor",
+         # Accepts both new BCryptPasswordEncoder(12) and the
+         # (BCryptVersion, strength[, SecureRandom]) overload - any digit
+         # inside the parens means a strength was set explicitly, not just
+         # strength as the very first argument.
+         re.compile(r"new\s+BCryptPasswordEncoder\s*\([^)\n]{0,120}\d", re.I),
+         "LOW", [], [], kind="hardening",
+         note="An explicit BCrypt strength/cost parameter is set instead of relying on the default.",
+         fix=""),
+    Rule("HARDEN-STRONG-PW-ENCODER", "Modern memory/CPU-hard password encoder in use",
+         re.compile(r"\b(?:Argon2PasswordEncoder|SCryptPasswordEncoder|Pbkdf2PasswordEncoder)\b"),
+         "LOW", [], [], kind="hardening",
+         note="A modern, deliberately slow password encoder (Argon2/SCrypt/PBKDF2) is used instead of a fast general-purpose hash.",
+         fix=""),
+    Rule("HARDEN-SECURE-RANDOM", "java.security.SecureRandom used for random values",
+         re.compile(r"new\s+SecureRandom\s*\("),
+         "LOW", [], [], kind="hardening",
+         note="A cryptographically strong random source is used instead of java.util.Random.",
+         fix=""),
+    Rule("HARDEN-CSP-CONFIGURED", "Content-Security-Policy explicitly configured",
+         re.compile(r"\.contentSecurityPolicy\s*\(|\bContentSecurityPolicyHeaderWriter\b", re.I),
+         "LOW", [], [], kind="hardening",
+         note="A Content-Security-Policy is explicitly configured rather than left at the framework default.",
+         fix=""),
+    Rule("HARDEN-HSTS-CONFIGURED", "HTTP Strict-Transport-Security explicitly configured",
+         re.compile(r"\.httpStrictTransportSecurity\s*\(|\bHstsHeaderWriter\b", re.I),
+         "LOW", [], [], kind="hardening",
+         note="HSTS is explicitly configured, helping enforce HTTPS on returning clients.",
+         fix=""),
+    Rule("HARDEN-COOKIE-HTTPONLY", "Cookie explicitly marked HttpOnly",
+         # .setHttpOnly(true) is specific to javax/jakarta Cookie - safe unscoped.
+         # Bare .httpOnly(true) is also a generic fluent-builder shape (unrelated
+         # builders use the same method name), so that alternative requires
+         # "cookie" to appear earlier on the same statement (matches both the
+         # ResponseCookie/-Builder class name and a `cookie`-named variable).
+         # No \b before "cookie": it must also match inside a camelCase
+         # identifier like ResponseCookie/CookieBuilder, where a word
+         # boundary never occurs between "Response" and "Cookie".
+         re.compile(r"\.setHttpOnly\s*\(\s*true\s*\)|cookie[^;\n]{0,200}?\.httpOnly\s*\(\s*true\s*\)", re.I),
+         "LOW", [], [], kind="hardening",
+         note="A cookie is explicitly marked HttpOnly, blocking script access to its value.",
+         fix=""),
+    Rule("HARDEN-COOKIE-SECURE-FLAG", "Cookie explicitly marked Secure",
+         # Same reasoning as HARDEN-COOKIE-HTTPONLY: bare .secure(true) is too
+         # generic a builder shape (TLS/HTTP client builders use it too) to
+         # trust without "cookie" context nearby.
+         # Same camelCase reasoning as HARDEN-COOKIE-HTTPONLY: no \b before "cookie".
+         re.compile(r"\.setSecure\s*\(\s*true\s*\)|cookie[^;\n]{0,200}?\.secure\s*\(\s*true\s*\)", re.I),
+         "LOW", [], [], kind="hardening",
+         note="A cookie is explicitly marked Secure, restricting it to HTTPS transport.",
+         fix=""),
+    Rule("HARDEN-METHOD-SECURITY", "Method-level authorization in use",
+         re.compile(r"@EnableMethodSecurity\b|@(?:PreAuthorize|PostAuthorize)\s*\(", re.I),
+         "LOW", [], [], kind="hardening",
+         note="Fine-grained method-level authorization (@EnableMethodSecurity/@PreAuthorize/@PostAuthorize) is in use.",
+         fix=""),
+    Rule("HARDEN-CORS-EXPLICIT-ORIGIN", "CORS allowedOrigins pinned to an explicit HTTPS origin",
+         # Covers both the WebMvcConfigurer/CorsRegistry form (.allowedOrigins(...))
+         # and the CorsConfiguration form (setAllowedOrigins(...)/addAllowedOrigin(...)).
+         re.compile(r"\.allowedOrigins\s*\(\s*[\"']https://|"
+                    r"\.setAllowedOrigins\s*\([^)\n]{0,40}[\"']https://|"
+                    r"\.addAllowedOrigin\s*\(\s*[\"']https://", re.I),
+         "LOW", [], [], kind="hardening",
+         note="CORS is restricted to an explicit HTTPS origin rather than a wildcard.",
+         fix=""),
+    Rule("HARDEN-XXE-DISALLOW-DOCTYPE", "XML parser explicitly disallows DOCTYPE declarations",
+         re.compile(r"setFeature\s*\(\s*[\"']http://apache\.org/xml/features/disallow-doctype-decl[\"']\s*,\s*true\s*\)", re.I),
+         "LOW", [], [], kind="hardening",
+         note="DOCTYPE declarations are explicitly disallowed on this XML parser, the strongest available XXE mitigation.",
+         fix=""),
+    Rule("HARDEN-PREPARED-STATEMENT", "Parameterized SQL via a literal PreparedStatement query",
+         re.compile(r"\.prepareStatement\s*\(\s*[\"']", re.I),
+         "LOW", [], [], kind="hardening",
+         note="The SQL query text is a literal passed to PreparedStatement, i.e. parameterized rather than built by concatenation.",
+         fix=""),
+    Rule("HARDEN-BEAN-VALIDATION-CONSTRAINT", "Bean Validation constraint annotation present",
+         re.compile(r"@(?:NotNull|NotBlank|NotEmpty|Size|Email|Pattern|Digits|Min|Max|Positive|Negative)\b"),
+         "LOW", [], [], kind="hardening",
+         note="A Bean Validation constraint annotation enforces a concrete rule on this field/parameter.",
+         fix=""),
+]
+RULES.extend(HARDENING_RULES)
+RULE_BY_ID.update({r.rid: r for r in HARDENING_RULES})
+
 # --- 4) extra config rules (properties/YAML) ------------------------------
 # Same format as PROP_RULES:  (rule_id, pattern, severity, note, fix)
 MERGE_PROP_RULES: List[Tuple[str, "re.Pattern", str, str, str]] = [
@@ -4664,11 +4686,12 @@ def _method_body_end(text: str, brace_pos: int) -> int:
     return len(text) - 1
 
 
-def analyze_spel_from_request(rel: str, text: str) -> List["Finding"]:
+def analyze_spel_from_request(rel: str, text: str, context_radius: int = CONTEXT_RADIUS) -> List["Finding"]:
     """CodeQL technique java/spring/spel-injection-from-request in Python:
     a request-bound method parameter + a dynamic parseExpression() in the same
     method."""
     out: List[Finding] = []
+    source_lines = text.splitlines()
     for m in _METHOD_SIG_RE.finditer(text):
         brace = m.end() - 1  # position of '{'
         if brace < 0 or brace >= len(text) or text[brace] != "{":
@@ -4690,7 +4713,7 @@ def analyze_spel_from_request(rel: str, text: str) -> List["Finding"]:
                 fix="Do not parse user-influenced strings as SpEL; use SimpleEvaluationContext "
                     "or fixed expressions.",
                 fingerprint=fingerprint(rel, "SRC-SPEL-REQUEST", snippet),
-                context=context_lines(text.splitlines(), line)))
+                context=context_lines(source_lines, line, context_radius)))
     return out
 
 
@@ -4702,11 +4725,12 @@ _LDAP_TYPE_RE = re.compile(r"\b(?:DirContext|LdapTemplate)\b")
 _LDAP_SEARCH_CONCAT_RE = re.compile(r"\.search\s*\([^;]{0,200}[\"']\s*\+")
 
 
-def analyze_ldap_injection(rel: str, text: str) -> List["Finding"]:
+def analyze_ldap_injection(rel: str, text: str, context_radius: int = CONTEXT_RADIUS) -> List["Finding"]:
     """Flags an LDAP search filter built via string concatenation, where a
     DirContext/LdapTemplate type is mentioned earlier in the same file
     (heuristic, file-scoped rather than true data flow)."""
     out: List[Finding] = []
+    source_lines = text.splitlines()
     for m in _LDAP_SEARCH_CONCAT_RE.finditer(text):
         window = text[max(0, m.start() - 300):m.start()]
         if not _LDAP_TYPE_RE.search(window):
@@ -4722,7 +4746,7 @@ def analyze_ldap_injection(rel: str, text: str) -> List["Finding"]:
             fix="Escape special LDAP filter characters (e.g. via "
                 "org.springframework.ldap.support.LdapEncoder) or use parameterized filters.",
             fingerprint=fingerprint(rel, "SRC-LDAP-INJECTION", snippet),
-                context=context_lines(text.splitlines(), line)))
+                context=context_lines(source_lines, line, context_radius)))
     return out
 
 
@@ -4741,11 +4765,12 @@ _LOG_CALL_BARE_ARG_RE = re.compile(
     r"\s*\(\s*([A-Za-z_$][\w$]*)\s*\)")
 
 
-def analyze_log_injection(rel: str, text: str) -> List["Finding"]:
+def analyze_log_injection(rel: str, text: str, context_radius: int = CONTEXT_RADIUS) -> List["Finding"]:
     """Flags a logger call whose sole, bare argument is a method parameter -
     the parameter reaches the log sink unmodified and unformatted, which is
     exactly the Log4Shell attack shape (and log-forging in general)."""
     out: List[Finding] = []
+    source_lines = text.splitlines()
     for m in _METHOD_SIG_RE.finditer(text):
         brace = m.end() - 1
         if brace < 0 or brace >= len(text) or text[brace] != "{":
@@ -4766,16 +4791,17 @@ def analyze_log_injection(rel: str, text: str) -> List["Finding"]:
                 file=rel, line=line, rule_id="SRC-LOG-INJECTION",
                 rule_name="Unsanitized request input logged directly (Log4Shell-class sink)",
                 severity="HIGH", status="TAINT", code=snippet,
-                note="A method parameter is passed bare into a logger call in the same method - "
-                     "this is the exact code-level trigger shape for Log4Shell-class bugs "
-                     "(a vulnerable logging library evaluates attacker-controlled lookup syntax "
-                     "in the logged string) and enables log forging/injection regardless of the "
-                     "logging library's own patch status.",
+                note=f"Method parameter `{lm.group(1)}` is passed bare into a logger call "
+                     "in the same method - this is the exact code-level trigger shape for "
+                     "Log4Shell-class bugs (a vulnerable logging library evaluates "
+                     "attacker-controlled lookup syntax in the logged string) and enables "
+                     "log forging/injection regardless of the logging library's own patch "
+                     "status.",
                 fix="Never log raw, unvalidated request input directly; use a parameterized "
                     "logging call (e.g. logger.info(\"token={}\", sanitize(token))) and/or strip "
                     "control characters and lookup-like syntax (${...}) before logging.",
                 fingerprint=fingerprint(rel, "SRC-LOG-INJECTION", snippet),
-                context=context_lines(text.splitlines(), line)))
+                context=context_lines(source_lines, line, context_radius)))
     return out
 
 
@@ -4797,13 +4823,14 @@ _SQL_EXEC_CALL_RE = re.compile(
     r"prepareStatement|prepareCall)\s*\(\s*(\w+)\s*[,)]")
 
 
-def analyze_sqli_var_concat(rel: str, text: str) -> List["Finding"]:
+def analyze_sqli_var_concat(rel: str, text: str, context_radius: int = CONTEXT_RADIUS) -> List["Finding"]:
     """Flags String sql = "..." + var; ... executeQuery(sql) - a variable built
     via concatenation earlier in the SAME METHOD and later passed bare into a
     JDBC/JPA execute-style call. Method-scoped correlation, not full data flow;
     a PreparedStatement built from a literal-only string (no '+') is correctly
     not flagged, since the assignment step requires concatenation."""
     out: List[Finding] = []
+    source_lines = text.splitlines()
     for m in _METHOD_SIG_RE.finditer(text):
         brace = m.end() - 1
         if brace < 0 or brace >= len(text) or text[brace] != "{":
@@ -4831,7 +4858,7 @@ def analyze_sqli_var_concat(rel: str, text: str) -> List["Finding"]:
                     "setString/setInt/... or JPA/MyBatis query parameters) instead of "
                     "concatenating values into the SQL string.",
                 fingerprint=fingerprint(rel, "SRC-SQLI-VAR-CONCAT", snippet),
-                context=context_lines(text.splitlines(), line)))
+                context=context_lines(source_lines, line, context_radius)))
     return out
 
 
@@ -4859,6 +4886,7 @@ EXTRA_RULE_META = {
     "SRC-LDAP-INJECTION": ("HIGH", "Concatenated LDAP search filter"),
     "SRC-LOG-INJECTION": ("HIGH", "Request input in log output"),
     "SRC-SQLI-VAR-CONCAT": ("CRITICAL", "Concatenated SQL variable passed to query"),
+    "HARDEN-REQUEST-BODY-VALID": ("INFO", "Request-body DTO parameter validated with @Valid/@Validated"),
 }
 
 
@@ -4866,6 +4894,7 @@ def rule_catalog() -> Dict[str, Tuple[str, str]]:
     catalog = {r.rid: (r.severity, r.name) for r in RULES}
     catalog.update({rid: (sev, note) for rid, _, sev, note, _ in PROP_RULES})
     catalog.update({"DEP-" + r.artifact.upper(): (r.severity, r.note) for r in DEP_RULES})
+    catalog["DEP-UNRESOLVED"] = ("MEDIUM", "Dependency assessment incomplete: exact coordinates/version unresolved")
     catalog.update({rid: (sev, note) for rid, _, sev, _, note, _ in BUILD_HYGIENE_RULES})
     catalog.update(EXTRA_RULE_META)
     catalog["OSV-<advisory-id>"] = ("DYNAMIC", "One rule per returned OSV advisory; severity comes from advisory data")
@@ -4939,6 +4968,10 @@ def _closing(text: str, pos: int, left: str = "(", right: str = ")") -> int:
     return -1
 
 
+_WEB_METHOD_TAIL = re.compile(
+    r"\s*(?:throws\s+[\w.,\s]+)?(?:\s*:\s*[\w<>?.]+)?\s*\{")
+
+
 def _web_methods(text: str):
     masked = _structure_mask(text)
     for m in re.finditer(r"\b([A-Za-z_$][\w$]*)\s*\(", masked):
@@ -4948,10 +4981,10 @@ def _web_methods(text: str):
         closing = _closing(masked, opening)
         if closing < 0:
             continue
-        tail = re.match(r"\s*(?:throws\s+[\w.,\s]+)?(?:\s*:\s*[\w<>?.]+)?\s*\{", masked[closing + 1:])
+        tail = _WEB_METHOD_TAIL.match(masked, closing + 1)
         if not tail:
             continue
-        begin = closing + 1 + tail.end() - 1
+        begin = tail.end() - 1
         finish = _closing(masked, begin, "{", "}")
         if finish < 0:
             continue
@@ -5029,7 +5062,7 @@ def _flow_statements(body: str) -> List[FlowStatement]:
     return nodes
 
 
-def build_flow_ast(text: str) -> List[FlowMethodAst]:
+def build_flow_ast(text: str, method_bounds=None) -> List[FlowMethodAst]:
     """Create a compact method AST for parameters, assignments and calls.
 
     This is a dependency-free Java/Kotlin subset rather than a compiler AST.
@@ -5038,7 +5071,8 @@ def build_flow_ast(text: str) -> List[FlowMethodAst]:
     established heuristic analyzers.
     """
     methods: List[FlowMethodAst] = []
-    for start, opening, closing, body_start, body_end in _web_methods(text):
+    for start, opening, closing, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
         params = text[opening + 1:closing]
         sources: Dict[str, List[str]] = {}
         for _, param in _parameter_parts(params):
@@ -5075,13 +5109,13 @@ def _flow_sanitizers(expression: str, inherited: Sequence[Set[str]]) -> Set[str]
     return direct | common
 
 
-def analyze_structured_dataflow(rel: str, text: str) -> List[Finding]:
+def analyze_structured_dataflow(rel: str, text: str, context_radius: int = CONTEXT_RADIUS, method_bounds=None) -> List[Finding]:
     """Propagate request taint through assignment AST nodes to security sinks."""
     out: List[Finding] = []
     lines = text.splitlines()
     identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
     source_call = re.compile(r"\b(getParameter|getHeader|getQueryString|getReader|readLine)\s*\(")
-    for method in build_flow_ast(text):
+    for method in build_flow_ast(text, method_bounds):
         paths = dict(method.sources)
         sanitizers: Dict[str, Set[str]] = {name: set() for name in paths}
         body_offset = method.body_start + 1
@@ -5151,7 +5185,7 @@ def analyze_structured_dataflow(rel: str, text: str) -> List[Finding]:
                     fix=("Do not pass request-controlled data to this sink; use parameterization "
                          "or the context-appropriate encoder."),
                     flow=flow, fingerprint=fingerprint(rel, rid, code),
-                    context=context_lines(lines, line)))
+                    context=context_lines(lines, line, context_radius)))
     return out
 
 
@@ -5160,7 +5194,8 @@ def dedupe_findings(findings: Sequence[Finding]) -> List[Finding]:
     by_sink: Dict[Tuple[str, int, str], Finding] = {}
     order: List[Tuple[str, int, str]] = []
     for finding in findings:
-        key = (finding.file, finding.line, finding.rule_id)
+        key = (finding.file, finding.line, finding.rule_id,
+               finding.fingerprint if finding.rule_id.startswith(("DEP-", "OSV-")) else "")
         if key not in by_sink:
             order.append(key)
             by_sink[key] = finding
@@ -5169,7 +5204,7 @@ def dedupe_findings(findings: Sequence[Finding]) -> List[Finding]:
     return [by_sink[key] for key in order]
 
 
-def analyze_web_source(rel: str, text: str) -> List[Finding]:
+def analyze_web_source(rel: str, text: str, context_radius: int = CONTEXT_RADIUS, method_bounds=None) -> List[Finding]:
     findings: List[Finding] = []
     lines = text.splitlines()
     def add(rid, pos, note, fix, severity="MEDIUM"):
@@ -5178,21 +5213,43 @@ def analyze_web_source(rel: str, text: str) -> List[Finding]:
         findings.append(Finding(file=rel, line=line, rule_id=rid,
             rule_name=EXTRA_RULE_META[rid][1], severity=severity, status="REVIEW",
             code=code, note=note, fix=fix, fingerprint=fingerprint(rel, rid, code),
-            context=context_lines(lines, line)))
-    for start, op, close, begin, end in _web_methods(text):
+            context=context_lines(lines, line, context_radius)))
+    def add_hardened(rid, pos, note):
+        # Positive counterpart to add(): the construct at `pos` IS the good
+        # practice, so it is always HARDENED/INFO (shown via --show-hardened),
+        # never a REVIEW/VULNERABLE finding.
+        line = text.count("\n", 0, pos) + 1
+        code = lines[line - 1].strip()
+        findings.append(Finding(file=rel, line=line, rule_id=rid,
+            rule_name=EXTRA_RULE_META[rid][1], severity="INFO", status="HARDENED",
+            code=code, note=note, fix="", fingerprint=fingerprint(rel, rid, code),
+            context=context_lines(lines, line, context_radius)))
+    for start, op, close, begin, end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
         signature = text[start:begin]
         params = text[op + 1:close]
         body = text[begin + 1:end]
+        method_name_m = re.search(r"([A-Za-z_$][\w$]*)\s*$", text[start:op])
+        method_name = method_name_m.group(1) if method_name_m else "?"
         for offset, param in _parameter_parts(params):
             request_body = re.search(r"@(?:[\w]+\.)*RequestBody\b", param)
-            if not request_body or re.search(r"@(?:[\w]+\.)*(?:Valid|Validated)\b", param):
+            if not request_body:
                 continue
+            has_valid = bool(re.search(r"@(?:[\w]+\.)*(?:Valid|Validated)\b", param))
             plain = re.sub(r"@(?:[\w]+\.)*\w+(?:\s*\([^)]*\))?", "", param).strip()
             if re.search(r"\b(?:String|int|long|boolean|double|float|byte|short|char|Integer|Long|Boolean|Double|Float|Byte|Short|Character|Map|List|Set|Collection)\b", plain):
                 continue
+            type_and_name = plain.rsplit(None, 1)
+            detail = f" Parameter `{type_and_name[1]}` of type `{type_and_name[0]}`" if len(type_and_name) == 2 else ""
+            detail += f" in `{method_name}(...)`."
+            if has_valid:
+                add_hardened("HARDEN-REQUEST-BODY-VALID", op + 1 + offset + request_body.start(),
+                    "DTO request parameter has Bean Validation enforced via @Valid/@Validated." + detail)
+                continue
             add("SRC-REQUEST-BODY-NO-VALID", op + 1 + offset + request_body.start(),
-                "DTO request parameter has no @Valid/@Validated on this parameter. Bean constraints may not run; "
-                "manual validation and actual DTO constraints are not resolved.",
+                "DTO request parameter has no @Valid/@Validated on this parameter." + detail +
+                " Bean constraints may not run; manual validation and actual DTO constraints "
+                "are not resolved.",
                 "Annotate the DTO parameter with @Valid or @Validated and configure a Bean Validation provider.")
         # Track string parameters and local string assignments, not arbitrary DTOs.
         string_names = set(re.findall(r"\bString\s+(\w+)|\b(\w+)\s*:\s*String\b", params + "\n" + body))
@@ -5200,6 +5257,7 @@ def analyze_web_source(rel: str, text: str) -> List[Finding]:
         html_response = bool(re.search(r'text/html|TEXT_HTML', signature + body))
         non_html_response = bool(re.search(r'application/json|APPLICATION_JSON|text/plain|TEXT_PLAIN', signature + body)) and not html_response
         sinks = []
+        masked_body = _structure_mask(body)
         for match in re.finditer(r"\.getWriter\s*\(\s*\)\s*\.\s*(?:write|print|println)\s*\(", body):
             sinks.append((match, "SRC-XSS-WRITER"))
         for match in re.finditer(r"\bResponseEntity\s*\.\s*ok\s*\(", body):
@@ -5209,7 +5267,7 @@ def analyze_web_source(rel: str, text: str) -> List[Finding]:
             sinks.append((match, "SRC-XSS-RESPONSE-ENTITY"))
         for match, rid in sinks:
             opening = match.end() - 1
-            closing = _closing(_structure_mask(body), opening)
+            closing = _closing(masked_body, opening)
             if closing < 0:
                 continue
             expr = body[opening + 1:closing].strip()
@@ -5254,21 +5312,746 @@ def _encoded_expression(expr: str, preceding: str) -> bool:
     return False
 
 
-def analyze_template(rel: str, text: str) -> List[Finding]:
+def analyze_template(rel: str, text: str, context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
     clean = re.sub(r"<!--[\s\S]*?-->", lambda m: re.sub(r"[^\n]", " ", m.group()), text)
     findings = []
+    source_lines = text.splitlines()
     for m in re.finditer(r'''\b(?:th:utext|data-th-utext)\s*=\s*(["'])([\s\S]*?)\1''', clean):
         if not re.search(r"[$*#]\{|\[\[|\[\(", m.group(2)):
             continue
         line = clean.count("\n", 0, m.start()) + 1
-        code = text.splitlines()[line - 1].strip()
+        code = source_lines[line - 1].strip()
         rid = "TPL-XSS-TH-UTEXT"
         findings.append(Finding(file=rel, line=line, rule_id=rid, rule_name=EXTRA_RULE_META[rid][1],
             severity="MEDIUM", status="REVIEW", code=code,
             note="Dynamic unescaped template output. Verify trust/sanitization of the model value; this is not proof of exploitability.",
             fix="Use th:text for ordinary text; sanitize intentionally supported HTML with an appropriate allowlist.",
-            fingerprint=fingerprint(rel, rid, code), context=context_lines(text.splitlines(), line)))
+            fingerprint=fingerprint(rel, rid, code), context=context_lines(source_lines, line, context_radius)))
     return findings
+
+
+
+# Necessary literals for the built-in patterns; never sufficient to report a finding.
+_RULE_LITERAL_HINTS = {'ANTI-ACCESS-ALL': ('ACCESS_EXTERNAL_',),
+ 'ANTI-DOCTYPE-ON': ('disallow-doctype-decl',),
+ 'ANTI-EXPAND-ENTITIES-ON': ('setExpand',),
+ 'ANTI-EXT-ENTITIES-ON': ('external-',
+                          'IS_SUPPORTING_EXTERNAL_ENTITIES',
+                          'setProcessExternalEntities'),
+ 'ANTI-SPRING-DTD-ON': ('setSupportDtd',),
+ 'ANTI-STAX-DTD-ON': ('SUPPORT_DTD', 'supportDTD'),
+ 'ANTI-XINCLUDE-ON': ('setXIncludeAware',),
+ 'DESER-XMLDECODER': ('XMLDecoder',),
+ 'DESER-XSTREAM': ('XStream', 'fromXML'),
+ 'HARDEN-BCRYPT-STRENGTH': ('BCryptPasswordEncoder',),
+ 'HARDEN-BEAN-VALIDATION-CONSTRAINT': ('@',),
+ 'HARDEN-COOKIE-HTTPONLY': ('HttpOnly',),
+ 'HARDEN-COOKIE-SECURE-FLAG': ('secure',),
+ 'HARDEN-CORS-EXPLICIT-ORIGIN': ('https://',),
+ 'HARDEN-CSP-CONFIGURED': ('contentSecurityPolicy', 'ContentSecurityPolicyHeaderWriter'),
+ 'HARDEN-HSTS-CONFIGURED': ('httpStrictTransportSecurity', 'HstsHeaderWriter'),
+ 'HARDEN-METHOD-SECURITY': ('EnableMethodSecurity', 'PreAuthorize', 'PostAuthorize'),
+ 'HARDEN-PREPARED-STATEMENT': ('prepareStatement',),
+ 'HARDEN-SECURE-RANDOM': ('SecureRandom',),
+ 'HARDEN-STRONG-PW-ENCODER': ('Argon2PasswordEncoder',
+                              'SCryptPasswordEncoder',
+                              'Pbkdf2PasswordEncoder'),
+ 'HARDEN-XXE-DISALLOW-DOCTYPE': ('disallow-doctype-decl',),
+ 'OAUTH2-REACTIVE-JWK-REMOTE': ('NimbusReactiveJwtDecoder',),
+ 'OAUTH2-REACTIVE-NO-ISSUER': ('NimbusReactiveJwtDecoder',),
+ 'RSOCKET-NO-PAYLOAD-AUTH': ('EnableRSocketSecurity',),
+ 'RSOCKET-PERMITALL': ('authorizePayload', 'RSocketSecurity'),
+ 'SRC-CMD-EXEC': ('Runtime', 'ProcessBuilder'),
+ 'SRC-CORS-ORIGIN-REFLECTION': ('Access-Control-Allow-Origin',),
+ 'SRC-CRLF-HEADER-INJECTION': ('addHeader', 'setHeader'),
+ 'SRC-CROSSORIGIN-BARE': ('@CrossOrigin',),
+ 'SRC-CRYPTO-WEAK-CIPHER': ('Cipher',),
+ 'SRC-CRYPTO-WEAK-HASH': ('MessageDigest',),
+ 'SRC-CRYPTO-WEAK-KEY': ('KeyPairGenerator', 'RSA', 'DSA'),
+ 'SRC-CRYPTO-WEAK-RANDOM': ('Random',),
+ 'SRC-DECOMPRESSION-BOMB': ('InputStream',),
+ 'SRC-DESER-JACKSON-DEFTYPING': ('enableDefaultTyping', 'activateDefaultTyping'),
+ 'SRC-DESER-NATIVE': ('ObjectInputStream',),
+ 'SRC-DESER-SNAKEYAML': ('Yaml',),
+ 'SRC-DIRECTORY-LISTING': ('Files', 'DirectoryStream'),
+ 'SRC-EXCEPTION-SWALLOW': ('catch',),
+ 'SRC-FASTJSON-PARSE': ('JSON',),
+ 'SRC-HOSTNAME-VERIFIER': ('setHostnameVerifier',),
+ 'SRC-IDOR': ('Mapping',),
+ 'SRC-JNDI-LOOKUP': ('lookup',),
+ 'SRC-LOG-SENSITIVE': ('log',),
+ 'SRC-MASS-ASSIGNMENT': ('ModelAttribute', 'WebDataBinder'),
+ 'SRC-OPEN-REDIRECT': ('sendRedirect', 'RedirectView', 'redirect:'),
+ 'SRC-PATH-TRAVERSAL': ('File', 'Paths'),
+ 'SRC-REFLECTION-INJECTION': ('Class', 'getDeclaredMethod', 'getMethod', 'invoke', 'Constructor'),
+ 'SRC-REGEX-INJECTION': ('Pattern', 'matches', 'replaceAll', 'replaceFirst', 'split'),
+ 'SRC-RESOURCE-EXHAUSTION': ('MultipartFile', 'readAllBytes'),
+ 'SRC-SENSITIVE-URL': ('sendRedirect', 'URI', 'URL', 'queryParam'),
+ 'SRC-SPEL-DYNAMIC': ('parseExpression',),
+ 'SRC-SQLI-CONCAT': ('createQuery',
+                     'createNativeQuery',
+                     'prepareStatement',
+                     'prepareCall',
+                     'execute'),
+ 'SRC-SSRF': ('URL',
+              'URI',
+              'RestTemplate',
+              'getForObject',
+              'getForEntity',
+              'postForObject',
+              'postForEntity',
+              'exchange',
+              'WebClient',
+              'HttpClient'),
+ 'SRC-TIMING-SECRET-COMPARE': ('equals',),
+ 'SRC-XPATH-INJECTION': ('XPath',),
+ 'SpringSecurityCheck-ACTUATOR-EXPOSED': ('web.exposure.include',),
+ 'SpringSecurityCheck-ACTUATOR-SHUTDOWN': ('management.endpoint.shutdown.enabled',),
+ 'SpringSecurityCheck-ANONYMOUS-ACCESS': ('anonymous', 'AnonymousAuthenticationFilter'),
+ 'SpringSecurityCheck-ANTI-DISABLE-SEC': ('@EnableWebSecurity',),
+ 'SpringSecurityCheck-ANTI-STACKTRACE': ('server.error.include-',),
+ 'SpringSecurityCheck-ANY-REQUEST-PERMIT': ('anyRequest',),
+ 'SpringSecurityCheck-BCRYPT-LOW-COST': ('BCryptPasswordEncoder',),
+ 'SpringSecurityCheck-CORS-ALL-METHODS': ('setAllowedMethods', 'addAllowedMethod'),
+ 'SpringSecurityCheck-CORS-WILDCARD': ('setAllowedOrigins',),
+ 'SpringSecurityCheck-CORS-WILDCARD-CRED': ('setAllowedOrigins',),
+ 'SpringSecurityCheck-CROSS-ORIGIN-BROAD': ('@CrossOrigin',),
+ 'SpringSecurityCheck-CSRF-DISABLED': ('csrf',),
+ 'SpringSecurityCheck-CSRF-IGNORE-PATH': ('ignoringRequestMatchers', 'ignoringAntMatchers'),
+ 'SpringSecurityCheck-EMPTY-PASSWORD-AUTH': ('setHideUserNotFoundExceptions', 'setPasswordEncoder'),
+ 'SpringSecurityCheck-HARDCODED-BCRYPT-COST-0': ('BCryptPasswordEncoder',),
+ 'SpringSecurityCheck-HEADERS-DISABLED': ('headers', 'frameOptions'),
+ 'SpringSecurityCheck-HTTP-BASIC-PROD': ('httpBasic',),
+ 'SpringSecurityCheck-IGNORE-REQUEST-MATCHER': ('ignoring',),
+ 'SpringSecurityCheck-INMEMORY-USERS': ('InMemoryUserDetailsManager', 'withDefaultPasswordEncoder'),
+ 'SpringSecurityCheck-JWT-ALG-CONFUSION': ('Jwts',),
+ 'SpringSecurityCheck-JWT-LONG-EXPIRY': ('expiration',),
+ 'SpringSecurityCheck-JWT-NO-ISSUER': ('NimbusJwtDecoder', 'Jwts'),
+ 'SpringSecurityCheck-NO-ACCESS-DENIED-HANDLER': ('exceptionHandling',),
+ 'SpringSecurityCheck-NO-CSP': ('headers',),
+ 'SpringSecurityCheck-NO-CTX-CLEAR': ('logout',),
+ 'SpringSecurityCheck-NO-FAILURE-HANDLER': ('formLogin',),
+ 'SpringSecurityCheck-NO-HSTS': ('headers',),
+ 'SpringSecurityCheck-NO-HTTPS': ('authorizeHttpRequests', 'authorizeRequests'),
+ 'SpringSecurityCheck-NO-METHOD-SECURITY': ('@EnableWebSecurity',),
+ 'SpringSecurityCheck-NULL-USERDETAILS': ('loadUserByUsername',),
+ 'SpringSecurityCheck-OAUTH2-NO-PKCE': ('ClientAuthenticationMethod',),
+ 'SpringSecurityCheck-PERMIT-ALL-BROAD': ('permitAll',),
+ 'SpringSecurityCheck-REMEMBERME-LONG': ('tokenValiditySeconds',),
+ 'SpringSecurityCheck-REMEMBERME-NO-KEY': ('rememberMe',),
+ 'SpringSecurityCheck-SAML-NO-SIGN': ('wantAssertionsSigned', 'authnRequestsSigned'),
+ 'SpringSecurityCheck-SESSION-FIXATION': ('sessionManagement',),
+ 'SpringSecurityCheck-SESSION-STATELESS-NO-JWT': ('SessionCreationPolicy',),
+ 'WEBFLUX-CSRF-DISABLED': ('csrf',),
+ 'WEBFLUX-FN-SENSITIVE-ROUTE': ('route',),
+ 'WEBFLUX-PERMITALL': ('authorizeExchange',),
+ 'X509-AUTH-CONFIG-REVIEW': ('x509',),
+ 'XXE-DIGESTER': ('Digester',),
+ 'XXE-DOM': ('DocumentBuilderFactory',),
+ 'XXE-DOM4J': ('SAXReader', 'DocumentHelper'),
+ 'XXE-JACKSON-XML': ('XmlMapper', 'XmlFactory'),
+ 'XXE-JAXB': ('createUnmarshaller', 'JAXB'),
+ 'XXE-JDOM': ('SAXBuilder',),
+ 'XXE-PULLPARSER': ('XmlPullParserFactory', 'newPullParser'),
+ 'XXE-SAX': ('SAXParserFactory', 'XMLReaderFactory'),
+ 'XXE-SCHEMA': ('SchemaFactory', 'newValidator'),
+ 'XXE-SOAP': ('MessageFactory', 'SOAPMessage'),
+ 'XXE-SPRING-OXM': ('Jaxb2Marshaller',),
+ 'XXE-STAX': ('XMLInputFactory',),
+ 'XXE-TRANSFORMER': ('TransformerFactory',),
+ 'XXE-XERCES-DIRECT': ('DOMParser', 'SAXParser'),
+ 'XXE-XPATH': ('XPathFactory',)}
+_RULE_PREFILTERS = {
+    rule.pattern: tuple(value.lower() if rule.pattern.flags & re.I else value
+                        for value in _RULE_LITERAL_HINTS[rule.rid])
+    for rule in RULES if rule.rid in _RULE_LITERAL_HINTS
+}
+
+
+def _version_key(value):
+    """Conservative Maven ordering subset; unresolved syntax returns None."""
+    if not value or re.search(r"SNAPSHOT|[${}\[\](),+*]|latest", value, re.I):
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)*)(?:[.-]?(alpha|beta|milestone|rc|cr|a|b|m|final|ga|release|sp)(\d*))?", value, re.I)
+    if not match:
+        return None
+    numbers = [int(n) for n in match.group(1).split('.')]
+    while len(numbers) > 1 and numbers[-1] == 0:
+        numbers.pop()
+    qualifier = (match.group(2) or '').lower()
+    rank = {'alpha': -4, 'a': -4, 'beta': -3, 'b': -3,
+            'milestone': -2, 'm': -2, 'rc': -1, 'cr': -1,
+            '': 0, 'final': 0, 'ga': 0, 'release': 0, 'sp': 1}[qualifier]
+    return numbers, rank, int(match.group(3) or 0)
+
+
+def _compare_versions(left, right):
+    a, b = _version_key(left), _version_key(right)
+    if a is None or b is None:
+        return None
+    width = max(len(a[0]), len(b[0]))
+    ka = (tuple(a[0] + [0] * (width-len(a[0]))), a[1], a[2])
+    kb = (tuple(b[0] + [0] * (width-len(b[0]))), b[1], b[2])
+    return (ka > kb) - (ka < kb)
+
+
+def is_older(found: str, fixed: str) -> Optional[bool]:
+    comparison = _compare_versions(found, fixed)
+    return None if comparison is None else comparison < 0
+
+
+def _pom_tree(content):
+    import xml.etree.ElementTree as ET
+    if re.search(r'<!DOCTYPE|<!ENTITY', content, re.I):
+        raise ValueError('DTD/entity declarations are not supported in build metadata')
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as exc:
+        raise ValueError('Invalid Maven XML: ' + str(exc))
+    for node in root.iter():
+        node.tag = node.tag.rsplit('}', 1)[-1]
+    return root
+
+
+def _xml_value(node, tag):
+    return (node.findtext(tag) or '').strip()
+
+
+def _expand_version(value, properties):
+    if not value:
+        return None
+    seen = set()
+    for _ in range(20):
+        if value in seen:
+            return None
+        seen.add(value)
+        if not re.search(r'\$\{[^}]+\}|\$[A-Za-z_]\w*', value):
+            return value
+        def replace(match):
+            key = match.group(1) or match.group(2)
+            return properties.get(key, match.group())
+        value = re.sub(r'\$\{([^}]+)\}|\$([A-Za-z_]\w*)', replace, value)
+    return None
+
+
+def _maven_parent_pom_path(pom_path: str, content: str) -> Optional[str]:
+    try:
+        project = _pom_tree(content)
+    except ValueError:
+        return None
+    parent = project.find('parent')
+    if parent is None:
+        return None
+    relative = parent.find('relativePath')
+    if relative is not None and not (relative.text or '').strip():
+        return None
+    path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(pom_path)),
+                                       (relative.text or '').strip() if relative is not None else '../pom.xml'))
+    if os.path.isdir(path):
+        path = os.path.join(path, 'pom.xml')
+    try:
+        with open(path, encoding='utf-8') as handle:
+            candidate = _pom_tree(handle.read())
+    except (OSError, ValueError):
+        return None
+    for tag in ('groupId', 'artifactId', 'version'):
+        expected = _xml_value(parent, tag)
+        actual = _xml_value(candidate, tag)
+        if not actual and tag != 'artifactId':
+            actual = _xml_value(candidate, 'parent/' + tag)
+        if not expected or expected != actual:
+            return None
+    return path
+
+
+def maven_resolution_context(pom_path: str, content: str, max_depth: int = 20):
+    """Local matching parent chain only; managed versions use full coordinates."""
+    chain, seen = [], set()
+    current = os.path.abspath(pom_path)
+    for _ in range(max_depth):
+        if current in seen:
+            break
+        seen.add(current)
+        try:
+            node = _pom_tree(content)
+        except ValueError:
+            break
+        chain.append(node)
+        parent = _maven_parent_pom_path(current, content)
+        if parent is None:
+            break
+        try:
+            with open(parent, encoding='utf-8') as handle:
+                content = handle.read()
+        except OSError:
+            break
+        current = parent
+    properties, managed = {}, {}
+    for node in reversed(chain):
+        props = node.find('properties')
+        if props is not None:
+            properties.update({child.tag: (child.text or '').strip() for child in props})
+        for tag in ('groupId', 'version'):
+            value = _xml_value(node, tag) or _xml_value(node, 'parent/' + tag)
+            if value:
+                properties['project.' + tag] = value
+                properties['pom.' + tag] = value
+        for dependency in node.findall('dependencyManagement/dependencies/dependency'):
+            if _xml_value(dependency, 'type') not in ('', 'jar') or _xml_value(dependency, 'classifier'):
+                continue
+            group = _expand_version(_xml_value(dependency, 'groupId'), properties)
+            artifact = _expand_version(_xml_value(dependency, 'artifactId'), properties)
+            version = _xml_value(dependency, 'version')
+            if group and artifact and version:
+                managed[group + ':' + artifact] = version
+    return properties, managed
+
+
+@dataclass
+class DependencyDeclaration:
+    group: str
+    artifact: str
+    version: Optional[str]
+    line: int = 1
+    reason: str = ''
+
+
+def _dependency_declarations(path, content):
+    """Shared static inventory for built-in rules and OSV. No build execution."""
+    rows = []
+    def line_of(artifact):
+        return next((i for i, line in enumerate(content.splitlines(), 1) if artifact in line), 1)
+    if path.endswith('.xml'):
+        try:
+            project = _pom_tree(content)
+        except ValueError as exc:
+            return [DependencyDeclaration('', 'build-metadata', None, reason=str(exc))]
+        props, managed = maven_resolution_context(path, content)
+        entries = [(d, '') for d in project.findall('dependencies/dependency')]
+        entries += [(d, 'Profile activation was not evaluated; resolve the effective build.')
+                    for d in project.findall('profiles/profile/dependencies/dependency')]
+        for entry, reason in entries:
+            group = _expand_version(_xml_value(entry, 'groupId'), props) or _xml_value(entry, 'groupId')
+            artifact = _expand_version(_xml_value(entry, 'artifactId'), props) or _xml_value(entry, 'artifactId')
+            if not artifact:
+                continue
+            version = _xml_value(entry, 'version')
+            if not version and _xml_value(entry, 'type') in ('', 'jar') and not _xml_value(entry, 'classifier'):
+                version = managed.get(group + ':' + artifact)
+            rows.append(DependencyDeclaration(group, artifact, _expand_version(version, props), line_of(artifact), reason))
+    elif path.endswith('.toml'):
+        versions = dict(TOML_VERSION.findall(content))
+        for alias, group, artifact, ref in TOML_LIB.findall(content):
+            entry = re.search(r'^' + re.escape(alias) + r'\s*=\s*\{([^}]+)\}', content, re.M)
+            is_reference = entry and re.search(r'\bversion\.ref\s*=', entry.group(1))
+            rows.append(DependencyDeclaration(group, artifact, versions.get(ref) if is_reference else ref, line_of(alias)))
+    else:
+        props = {}
+        try:
+            with open(os.path.join(os.path.dirname(path), 'gradle.properties'), encoding='utf-8') as handle:
+                for line in handle:
+                    match = re.match(r'\s*([\w.-]+)\s*=\s*(.*?)\s*$', line)
+                    if match:
+                        props[match.group(1)] = match.group(2)
+        except OSError:
+            pass
+        clean = strip_comments(content)
+        for match in re.finditer(r'''(?:\b(?:val|var|def)\s+)?\b([\w]+)\s*=\s*['"]([^'"\n]+)['"]''', clean):
+            props[match.group(1)] = match.group(2)
+        coordinate = re.compile(r'''['"]([\w.-]+):([\w.-]+)(?::([^'"\r\n]+))?['"]''')
+        constrained = {(g, a): v for g, a, v in GRADLE_VERSION_BLOCK.findall(clean)}
+        for match in coordinate.finditer(clean):
+            group, artifact, version = match.groups()
+            version = constrained.get((group, artifact), version)
+            rows.append(DependencyDeclaration(group, artifact, _expand_version(version, props), clean.count('\n', 0, match.start())+1))
+        for match in re.finditer(r'''group\s*[:=]\s*['"]([\w.-]+)['"]\s*,\s*name\s*[:=]\s*['"]([\w.-]+)['"]\s*,\s*version\s*[:=]\s*['"]([^'"]+)['"]''', clean):
+            group, artifact, version = match.groups()
+            rows.append(DependencyDeclaration(group, artifact, _expand_version(version, props), clean.count('\n', 0, match.start())+1))
+    unique = {}
+    for row in rows:
+        unique.setdefault((row.group, row.artifact, row.version, row.reason), row)
+    return list(unique.values())
+
+
+def _dependency_assessment(rule, version):
+    """Return status/note/fix; legacy thresholds are review hints, not CVEs."""
+    if _version_key(version) is None:
+        return 'REVIEW', 'Version unresolved or unsupported; vulnerability assessment incomplete.', 'Resolve the exact effective version and query OSV.'
+    if rule.artifact == 'log4j-core':
+        ranges = [('2.0-beta9', '2.3.1'), ('2.4', '2.12.2'), ('2.13', '2.15')]
+        affected = any(_compare_versions(version, lo) >= 0 and _compare_versions(version, hi) < 0 for lo, hi in ranges)
+        if affected:
+            return 'VULNERABLE', ('Version is affected by CVE-2021-44228 (Log4Shell); assess runtime configuration. '
+                    'https://logging.apache.org/security.html#CVE-2021-44228'), 'Use a supported Log4j release; this CVE was fixed in 2.3.1, 2.12.2 and 2.15.0 on the respective branches. These are not a complete security baseline.'
+        return None
+    if rule.artifact == 'spring-data-mongodb':
+        affected = (_compare_versions(version, '3.3.5') < 0 or
+                    (_compare_versions(version, '3.4') >= 0 and _compare_versions(version, '3.4.1') < 0))
+        if affected:
+            return 'VULNERABLE', ('Version is affected by CVE-2022-22980; exploitation additionally requires unsafe SpEL parameter placeholders in @Query/@Aggregation. '
+                    'https://spring.io/security/cve-2022-22980/'), 'This CVE was fixed in 3.3.5 and 3.4.1 on the respective branches. Prefer a supported release and check other advisories.'
+        return None
+    if rule.fixed and is_older(version, rule.fixed) is False:
+        return None
+    return 'REVIEW', rule.note, 'Verify exact package/version against current advisories (for example --check-osv); no universal safe version is asserted.'
+
+
+def _dependency_findings(rows, path, root):
+    rel = os.path.relpath(path, root) if root else path
+    out = []
+    for row in rows:
+        rules = [r for r in DEP_RULES if row.artifact == r.artifact and row.group in r.groups]
+        uncertain = not _coordinate_known(row.group, row.artifact) or _version_key(row.version) is None or bool(row.reason)
+        if uncertain:
+            rules = [None]
+        for rule in rules:
+            assessment = (('REVIEW', row.reason or 'Exact package/version unresolved or unsupported; vulnerability assessment incomplete.',
+                           'Resolve the effective dependency graph with --resolve-deps, then check current advisories.')
+                          if rule is None else _dependency_assessment(rule, row.version))
+            if assessment is None:
+                continue
+            status, note, fix = assessment
+            identity = '{}:{}:{}'.format(row.group or '?', row.artifact, row.version or '?')
+            rid = 'DEP-UNRESOLVED' if rule is None else 'DEP-' + row.artifact.upper()
+            severity = rule.severity if rule else 'MEDIUM'
+            out.append(Finding(file=rel, line=row.line, rule_id=rid, rule_name='Dependency ' + identity,
+                               severity=severity, status=status, code=identity, note=note, fix=fix,
+                               fingerprint=fingerprint(rel, rid, identity)))
+    return out
+
+
+def analyze_build_file(path: str, root: str) -> List[Finding]:
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            content = handle.read()
+    except OSError as exc:
+        return _dependency_findings([DependencyDeclaration('', 'build-metadata', None, reason=str(exc))], path, root)
+    return _dependency_findings(_dependency_declarations(path, content), path, root)
+
+
+def _osv_ecosystem_triples(path: str, content: str):
+    # Preserve exact ecosystem versions. Static unknowns remain visible as REVIEW.
+    return [(r.group, r.artifact, r.version) for r in _dependency_declarations(path, content)
+            if _coordinate_known(r.group, r.artifact) and not r.reason and _osv_version_is_concrete(r.version)]
+
+
+def _coordinate_known(group, artifact):
+    return bool(re.fullmatch(r'[\w.-]+', group or '') and re.fullmatch(r'[\w.-]+', artifact or ''))
+
+
+def _osv_version_is_concrete(version):
+    return bool(version and re.match(r'\d', version) and
+                not re.search(r'SNAPSHOT|[${}\[\](),+*\s]|latest', version, re.I))
+
+
+def _normalize_maven_version_for_osv(version: str) -> str:
+    """OSV receives the exact published version, including RC/SP qualifiers."""
+    return version
+
+
+def analyze_resolved_dependencies(dependencies, root):
+    out = []
+    for item in dependencies:
+        out.extend(_dependency_findings([DependencyDeclaration(item.group, item.artifact, item.version)], item.build_file, root))
+    return out
+
+
+def osv_query_online(group, artifact, version, timeout=8.0, retries=3):
+    """Exact-version OSV query with pagination and bounded per-page retries."""
+    import urllib.request
+    import urllib.error
+    import time
+    payload = {'version': version, 'package': {'name': group + ':' + artifact, 'ecosystem': 'Maven'}}
+    vulnerabilities, tokens = [], set()
+    for _ in range(1000):
+        response = None
+        for attempt in range(max(1, retries)):
+            request = urllib.request.Request(OSV_API_QUERY_URL, data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json', 'User-Agent': 'JSpringGuard/' + VERSION}, method='POST')
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as handle:
+                    response = json.loads(handle.read().decode('utf-8'))
+                if not isinstance(response, dict) or not isinstance(response.get('vulns', []), list):
+                    return None, 'Invalid OSV response schema'
+                break
+            except urllib.error.HTTPError as exc:
+                error = 'HTTP {}'.format(exc.code)
+                if exc.code != 429 and not 500 <= exc.code < 600:
+                    return None, error
+            except (OSError, ValueError) as exc:
+                error = '{}: {}'.format(type(exc).__name__, exc)
+            if attempt + 1 < retries:
+                time.sleep(1.5 * 2 ** attempt)
+        if response is None:
+            return None, error
+        vulnerabilities.extend(response.get('vulns', []))
+        token = response.get('next_page_token')
+        if not token:
+            return {'vulns': vulnerabilities}, None
+        if not isinstance(token, str) or token in tokens:
+            return None, 'Invalid or repeated OSV pagination token'
+        tokens.add(token)
+        payload['page_token'] = token
+    return None, 'OSV pagination limit exceeded; result incomplete'
+
+
+_DEP_GROUPS = {'castor-xml': ('org.codehaus.castor',),
+ 'commons-collections': ('commons-collections',),
+ 'commons-collections4': ('org.apache.commons',),
+ 'commons-digester': ('commons-digester',),
+ 'commons-text': ('org.apache.commons',),
+ 'dom4j': ('dom4j', 'org.dom4j'),
+ 'h2': ('com.h2database',),
+ 'jackson-databind': ('com.fasterxml.jackson.core',),
+ 'java-jwt': ('com.auth0',),
+ 'jdom': ('org.jdom', 'jdom'),
+ 'jdom2': ('org.jdom',),
+ 'jjwt': ('io.jsonwebtoken',),
+ 'jjwt-api': ('io.jsonwebtoken',),
+ 'log4j-core': ('org.apache.logging.log4j',),
+ 'logback-classic': ('ch.qos.logback',),
+ 'logback-core': ('ch.qos.logback',),
+ 'nimbus-jose-jwt': ('com.nimbusds',),
+ 'snakeyaml': ('org.yaml',),
+ 'spring-boot-autoconfigure': ('org.springframework.boot',),
+ 'spring-boot-starter-security': ('org.springframework.boot',),
+ 'spring-cloud-gateway': ('org.springframework.cloud',),
+ 'spring-cloud-netflix-eureka-client': ('org.springframework.cloud',),
+ 'spring-data-mongodb': ('org.springframework.data',),
+ 'spring-data-rest-core': ('org.springframework.data',),
+ 'spring-oxm': ('org.springframework',),
+ 'spring-security-config': ('org.springframework.security',),
+ 'spring-security-core': ('org.springframework.security',),
+ 'spring-security-web': ('org.springframework.security',),
+ 'spring-webmvc': ('org.springframework',),
+ 'tomcat-embed-core': ('org.apache.tomcat.embed',),
+ 'woodstox-core': ('com.fasterxml.woodstox',),
+ 'xercesImpl': ('xerces',),
+ 'xstream': ('com.thoughtworks.xstream',)}
+for _dependency_rule in DEP_RULES:
+    _dependency_rule.groups = _DEP_GROUPS[_dependency_rule.artifact]
+
+
+
+def print_osv_summary(finding_count, occurrences, unique, failed, first_error,
+                      diagnostics, offline=False, database=False):
+    successful = unique - failed
+    mode = "database assessments" if database else ("cache lookups" if offline else "queries")
+    print(f"[osv] Checked {successful}/{unique} unique package(s) successfully; "
+          f"{finding_count} advisory finding(s).", file=sys.stderr)
+    if occurrences != unique:
+        print(f"[osv] {occurrences} package occurrence(s) across build files.", file=sys.stderr)
+    if failed:
+        print(f"[osv] WARNING: {failed}/{unique} {mode} failed. "
+              f"First error: {first_error}", file=sys.stderr)
+    unresolved = diagnostics.get("unresolved", [])
+    if unresolved:
+        print(f"[osv] WARNING: {len(unresolved)} unresolved dependency declaration(s) skipped; "
+              "no OSV query was sent for these entries.", file=sys.stderr)
+        for item in unresolved:
+            print(f"[osv]   - {item}", file=sys.stderr)
+        advice = ("Supply exact versions in build metadata or review manually; "
+                  "the local advisory database cannot resolve a remote BOM." if database else
+                  "Resolve exact coordinates/versions (for trusted projects, --resolve-deps) or review manually.")
+        print("[osv] " + advice, file=sys.stderr)
+    if failed or unresolved:
+        print("[osv] Coverage is INCOMPLETE; the findings do not describe a complete scan.", file=sys.stderr)
+
+
+OSV_MAVEN_DUMP_URL = 'https://storage.googleapis.com/osv-vulnerabilities/Maven/all.zip'
+OSV_DB_SCHEMA = '1'
+
+
+def build_osv_database(archive, destination, source='local archive', source_modified=''):
+    """Import full Maven advisories and atomically replace the local SQLite DB."""
+    import sqlite3
+    import zipfile
+    from datetime import datetime, timezone
+    destination = os.path.abspath(destination)
+    if os.path.abspath(archive) == destination:
+        raise ValueError('Archive and database paths must differ')
+    parent = os.path.dirname(destination)
+    os.makedirs(parent, exist_ok=True)
+    digest = hashlib.sha256()
+    with open(archive, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    fd, temporary = tempfile.mkstemp(prefix='.osv-build-', suffix='.sqlite', dir=parent)
+    os.close(fd)
+    connection = None
+    try:
+        connection = sqlite3.connect(temporary)
+        connection.executescript('''
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE advisories (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+            CREATE TABLE packages (name TEXT NOT NULL, advisory_id TEXT NOT NULL,
+                                   PRIMARY KEY(name, advisory_id));
+        ''')
+        count = 0
+        with zipfile.ZipFile(archive) as bundle:
+            for entry in bundle.infolist():
+                if entry.is_dir() or not entry.filename.endswith('.json'):
+                    continue
+                record = json.loads(bundle.read(entry))
+                if not isinstance(record, dict) or not isinstance(record.get('id'), str):
+                    raise ValueError('Invalid OSV record: ' + entry.filename)
+                affected = record.get('affected', [])
+                if not isinstance(affected, list):
+                    raise ValueError('Invalid affected list: ' + entry.filename)
+                names = {a.get('package', {}).get('name') for a in affected
+                         if a.get('package', {}).get('ecosystem') == 'Maven'}
+                if not names and not record.get('withdrawn'):
+                    continue
+                if any(not isinstance(name, str) or not name for name in names):
+                    raise ValueError('Invalid Maven package name: ' + entry.filename)
+                connection.execute('INSERT INTO advisories VALUES (?, ?)',
+                    (record['id'], json.dumps(record, ensure_ascii=False, separators=(',', ':'))))
+                connection.executemany('INSERT INTO packages VALUES (?, ?)',
+                    [(name, record['id']) for name in names])
+                count += 1
+        package_count = connection.execute('SELECT count(DISTINCT name) FROM packages').fetchone()[0]
+        if not count or not package_count:
+            raise ValueError('Archive contains no usable Maven advisory database')
+        metadata = {'schema': OSV_DB_SCHEMA, 'ecosystem': 'Maven', 'source': source,
+                    'source_modified': source_modified, 'archive_sha256': digest.hexdigest(),
+                    'created_utc': datetime.now(timezone.utc).isoformat(),
+                    'advisories': str(count), 'packages': str(package_count)}
+        connection.executemany('INSERT INTO metadata VALUES (?, ?)', metadata.items())
+        connection.commit()
+        if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise ValueError('Database integrity check failed')
+        connection.close()
+        connection = None
+        os.replace(temporary, destination)
+        return metadata
+    finally:
+        if connection is not None:
+            connection.close()
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def update_osv_database(destination):
+    """Explicit online operation; ordinary offline scans never call this."""
+    import urllib.request
+    fd, archive = tempfile.mkstemp(prefix='osv-maven-', suffix='.zip')
+    os.close(fd)
+    try:
+        with urllib.request.urlopen(OSV_MAVEN_DUMP_URL, timeout=60) as response:
+            expected = response.headers.get('Content-Length')
+            modified = response.headers.get('Last-Modified', '')
+            total = 0
+            with open(archive, 'wb') as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    total += len(chunk)
+            if expected and total != int(expected):
+                raise ValueError('Incomplete OSV archive download; existing database preserved')
+        return build_osv_database(archive, destination, OSV_MAVEN_DUMP_URL, modified)
+    finally:
+        if os.path.exists(archive):
+            os.unlink(archive)
+
+
+def _offline_interval_contains(version, introduced, ending=None, inclusive=False):
+    lower = 1 if introduced == '0' else _compare_versions(version, introduced)
+    upper = -1 if ending is None else _compare_versions(version, ending)
+    if lower is not None and lower < 0:
+        return False
+    if upper is not None and (upper > 0 or (upper == 0 and not inclusive)):
+        return False
+    if lower is None or upper is None:
+        return None
+    return True
+
+
+def _offline_affected(version, affected):
+    """OSV union of explicit versions and ranges, with an unknown result."""
+    if version in affected.get('versions', []):
+        return True
+    unknown = False
+    ranges = affected.get('ranges', [])
+    for item in ranges:
+        if item.get('type') != 'ECOSYSTEM':
+            unknown = True
+            continue
+        introduced = None
+        events = item.get('events', [])
+        if not events:
+            unknown = True
+        for event in events:
+            if not isinstance(event, dict) or len(event) != 1:
+                unknown = True
+                continue
+            kind, value = next(iter(event.items()))
+            if kind == 'introduced':
+                if introduced is not None:
+                    unknown = True
+                introduced = value
+            elif kind in ('fixed', 'last_affected', 'limit') and introduced is not None:
+                answer = _offline_interval_contains(version, introduced, value, kind == 'last_affected')
+                if answer is True:
+                    return True
+                unknown |= answer is None
+                introduced = None
+            else:
+                unknown = True
+        if introduced is not None:
+            answer = _offline_interval_contains(version, introduced)
+            if answer is True:
+                return True
+            unknown |= answer is None
+    if unknown or (not ranges and not affected.get('versions')):
+        return None
+    return False
+
+
+class OfflineOsvDatabase:
+    """Read-only indexed lookup of a complete local Maven snapshot."""
+    def __init__(self, path):
+        import sqlite3
+        from pathlib import Path
+        self.connection = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            self.metadata = dict(self.connection.execute('SELECT key, value FROM metadata'))
+            if self.metadata.get('schema') != OSV_DB_SCHEMA or self.metadata.get('ecosystem') != 'Maven':
+                raise ValueError('Unsupported offline database schema/ecosystem')
+            self.connection.execute('SELECT name, advisory_id FROM packages LIMIT 1')
+            self.connection.execute('SELECT id, data FROM advisories LIMIT 1')
+        except Exception:
+            self.connection.close()
+            raise
+
+    def close(self):
+        self.connection.close()
+
+    def query(self, group, artifact, version):
+        name = group + ':' + artifact
+        matches, uncertain = [], []
+        for identifier, encoded in self.connection.execute(
+                'SELECT a.id, a.data FROM advisories a JOIN packages p ON p.advisory_id=a.id WHERE p.name=?', (name,)):
+            record = json.loads(encoded)
+            if record.get('withdrawn'):
+                continue
+            answers = [_offline_affected(version, item) for item in record.get('affected', [])
+                       if item.get('package', {}).get('ecosystem') == 'Maven'
+                       and item.get('package', {}).get('name') == name]
+            if any(answer is True for answer in answers):
+                matches.append(record)
+            elif any(answer is None for answer in answers):
+                uncertain.append(identifier)
+        error = ('Offline version comparison unresolved for ' + ', '.join(uncertain[:5]) +
+                 (' ...' if len(uncertain) > 5 else '')) if uncertain else None
+        return {'vulns': matches}, error
+
+
+def offline_database_error_types():
+    import sqlite3
+    import zipfile
+    return (OSError, ValueError, sqlite3.Error, zipfile.BadZipFile, KeyError, TypeError)
 
 
 if __name__ == "__main__":
