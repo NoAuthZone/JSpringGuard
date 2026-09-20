@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-JSpringGuard 3.8 - Static security analysis for JVM projects with offline OSV support.
+JSpringGuard 3.15 - Static security analysis for JVM projects with offline OSV support.
 
 STANDALONE TOOL: this single file is everything you need for its native rules. No Semgrep,
 CodeQL CLI/database, no other scripts, and no third-party Python packages -
 just this file and a Python 3.8+ interpreter. Any mention of "CodeQL" below
 refers to detection techniques that have been ported into this file's own
 Python rules; it does not mean CodeQL needs to be installed or run.
-
-
 
 New in 3.0 (Spring Security):
   * CSRF: disabled, GET-only matchers, missing token checks
@@ -46,13 +44,6 @@ New in 3.6:
   * full-file context display by default (--context 0: matched line only; --context N: ±N lines)
   * HTML report: scrollable source blocks (max-height 420 px) with auto-scroll to finding line
 
-New in 3.8:
-  * local OSV Maven database for offline scanning of Maven and Gradle dependencies
-  * database download/update, local ZIP import, and snapshot metadata
-  * full dependency coordinates, conservative version checks, and explicit unresolved findings
-  * corrected CVE mappings, exact OSV query versions, pagination, and clearer cache reporting
-  * cross-line source detection and conservative XXE hardening checks before first use
-
 New in 3.7:
   * 13 standalone positive-hardening rules (HARDEN-*), independent of any nearby risky
     construct: BCrypt work factor, Argon2/SCrypt/PBKDF2, SecureRandom, explicit CSP/HSTS,
@@ -68,12 +59,102 @@ New in 3.7:
     SRC-REQUEST-BODY-NO-VALID
   * HTML report: context line numbers are now padded/aligned like the terminal report
 
+New in 3.8:
+  * local OSV Maven database for offline scanning of Maven and Gradle dependencies
+  * database download/update, local ZIP import, and snapshot metadata
+  * full dependency coordinates, conservative version checks, and explicit unresolved findings
+  * corrected CVE mappings, exact OSV query versions, pagination, and clearer cache reporting
+  * cross-line source detection and conservative XXE hardening checks before first use
+
+New in 3.9:
+  * 7 new JWT vulnerability rules (JWT-* prefix), inspired by jwt_tool attack playbook:
+    JWT-NO-EXPIRY (missing exp claim), JWT-NO-AUDIENCE (missing aud validation),
+    JWT-NO-SUBJECT-VALIDATION (sub never checked), JWT-BLANK-SECRET (empty/trivial secret),
+    JWT-NULL-SIGNATURE (null/empty signature accepted), JWT-WEAK-KEY-SIZE (RSA/EC too small),
+    JWT-JWKS-HTTP (JWKS fetched over plain HTTP)
+  * JWT-KID-INJECTION cross-line check: kid claim value flows into DB/file/command sink
+  * 4 new HARDEN-JWT-* positive rules: HARDEN-JWT-STRONG-ALG (RS/ES/PS variants),
+    HARDEN-JWT-EXPIRY-SET (explicit exp), HARDEN-JWT-ISSUER-VALIDATION (.requireIssuer /
+    JwtValidators.createDefaultWithIssuer), HARDEN-JWT-SECRET-FROM-ENV (secret from
+    @Value / System.getenv / env.getProperty instead of string literal)
+  * New "JWT" category in the HTML report type filter (JWT-* prefix)
+  * All new rules have FAST_REJECT prefilter hints; full selftest suite still passes clean
+
+New in 3.10:
+  * 4 additional JWT rules: JWT-AUDIENCE-VALIDATION (parser ignores aud),
+    JWT-CLOCK-SKEW (clock skew >5 min), JWT-SENSITIVE-CLAIMS (PII/role data in payload),
+    JWT-REFRESH-TOKEN-REUSE (refresh token stored in an insecure location)
+  * JWT-KID-INJECTION extended: 6 more sink types (JNDI, LDAP, SSRF/RestTemplate,
+    MessageDigest, Cipher, DriverManager), Nimbus/Spring JwtHeader source patterns,
+    and a three-pass taint engine (source → passthrough method → sink)
+  * 5 new OAuth2/OIDC checks: OAUTH2-STATE-MISSING (CSRF in auth flow),
+    OAUTH2-TOKEN-LOGGING (Bearer token written to a logger),
+    OAUTH2-INTROSPECTION-HTTP (token introspection over plain HTTP),
+    OAUTH2-SCOPE-HARDCODED (scopes baked into source instead of config),
+    OIDC-NONCE-MISSING (nonce not validated in ID token)
+  * 2 new HARDEN-JWT-* positive rules: HARDEN-JWT-AUDIENCE-VALIDATION,
+    HARDEN-JWT-CLOCK-SKEW (JwtTimestampValidator with explicit skew)
+  * 2 new HARDEN-OAUTH2-* positive rules: HARDEN-OAUTH2-PKCE-ENABLED,
+    HARDEN-OAUTH2-STATE-PARAM
+
+New in 3.11:
+  * 7 new rules derived from CodeQL/Semgrep gap analysis:
+    JWT-PARSE-NO-VERIFY (CWE-347): .parse() used instead of .parseClaimsJws() —
+      signature is silently skipped even when a signing key is set (CodeQL java/missing-jwt-signature-check)
+    SRC-CRYPTO-STATIC-IV (CWE-329): static / hardcoded IV in GCMParameterSpec or IvParameterSpec
+    SRC-CRYPTO-RSA-NO-OAEP (CWE-780): Cipher.getInstance("RSA") or "RSA/ECB/PKCS1Padding" without OAEP
+    SRC-RANDOM-PREDICTABLE-SEED (CWE-330): SecureRandom initialised with a fixed/constant seed
+    SpringSecurityCheck-REGEX-NO-DOTALL: RegexRequestMatcher without CASE_INSENSITIVE flag
+      (auth bypass via newline injection)
+    SpringSecurityCheck-PREAUTH-ON-INTERFACE: @PreAuthorize/@PostAuthorize on an interface
+      method — Spring AOP ignores annotations on interfaces
+    SRC-SSTI-VIEW-NAME (CWE-094): Spring MVC view name returned from a request parameter
+      (open redirect + Server-Side Template Injection)
+  * 2 new HARDEN-* positive rules: HARDEN-CRYPTO-GCM-RANDOM-IV, HARDEN-RSA-OAEP
+  * FAST_REJECT prefilter hints for all 9 new rules; full selftest suite still passes clean    
+    
+New in 3.12:
+  * JWT-JKU-INJECTION and JWT-X5U-INJECTION: method-local taint tracking from
+    attacker-controlled JOSE header URLs into remote key/certificate loading
+  * OAUTH2-PKCE-PLAIN: rejects the downgrade-prone PKCE plain challenge method
+  * SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE: module-local correlation of
+    disabled CSRF protection with cookie-based JWT authentication
+  * AUTHZ-IDOR-DATAFLOW: @PathVariable identifiers reaching repository ID lookups
+    without visible method/object/tenant authorization evidence
+
+New in 3.13:
+  * embedded JWT key trust checks for attacker-supplied jwk and x5c headers
+  * authorization matcher ordering and inactive @PreAuthorize detection
+  * unsafe OAuth2 redirect comparison, token/secret query parameters, and OIDC/JWT
+    token-purpose validation checks
+  * TLS protocol, cipher, self-signed trust, revocation, optional mTLS, and
+    hardcoded keystore/truststore credential checks
+  * refresh-token rotation and logout-revocation lifecycle checks
+
+New in 3.14:
+  * multiple SecurityFilterChain ordering/fallback analysis and project-wide
+    interprocedural tenant/ID propagation through controller-service-repository calls
+  * OAuth issuer mix-up, nested JWT/JWE, issuer-key binding, token-key separation,
+    DPoP proof validation, and JWE compression checks
+  * committed private-key, empty PKCS12 password, password-reset lifecycle,
+    login throttling, and MFA fail-open checks
+
+New in 3.15:
+  * project-wide security-control coverage for HTTP endpoints, message consumers,
+    and scheduled jobs, with call-path evidence and a coverage matrix
+  * dedicated findings for authorization, tenant, validation, rate-limit, audit,
+    and partially protected service gaps
+  * --coverage and --fail-on-coverage-gap reporting/CI controls
+
 No third-party dependencies. Python 3.8+.
 
 Examples:
     python3 jspringguard.py ./src
     python3 jspringguard.py . --skip-tests --min-severity MEDIUM
     python3 jspringguard.py . --format html --out report.html
+    python3 jspringguard.py . --coverage
+    python3 jspringguard.py . --coverage --format html --out coverage.html
+    python3 jspringguard.py . --coverage --fail-on-coverage-gap
     python3 jspringguard.py . --write-baseline .sec-baseline.json
     python3 jspringguard.py . --baseline .sec-baseline.json --fail-on HIGH
     python3 jspringguard.py . --include-rule 'SRC-XSS-*' --exclude-rule '*-WRITER'
@@ -104,12 +185,13 @@ from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-VERSION = "3.8"
+VERSION = "3.15"
 AUTHOR = "NoAuthZone"
 AUTHOR_URL = "https://github.com/NoAuthZone"
 REPO_URL = "https://github.com/NoAuthZone/JSpringGuard"
 
 DEFAULT_EXTS = (".java", ".kt", ".jsp", ".groovy", ".scala")
+CERT_TEXT_EXTS = (".pem", ".key")
 DEFAULT_EXCLUDE_DIRS = {
     ".git", ".svn", ".hg", ".idea", ".vscode", "node_modules",
     "target", "build", "out", "bin", "dist", ".gradle", ".mvn", "generated",
@@ -628,6 +710,100 @@ JwtDecoder jwtDecoder() {
     return decoder;
 }"""
 
+FIX_JOSE_REMOTE_KEYS = """// Never trust jku/x5u URLs supplied by the token itself.
+// Configure a fixed HTTPS JWKS URI (or a pinned local key registry) and let the
+// trusted decoder select only a known kid from that configured key set.
+NimbusJwtDecoder decoder = NimbusJwtDecoder
+    .withJwkSetUri("https://auth.example.com/.well-known/jwks.json")
+    .build();"""
+
+FIX_PKCE_S256 = """// Public OAuth2 clients must use PKCE S256, never plain.
+authorizationRequest.additionalParameters(params -> {
+    params.put("code_challenge", base64Url(sha256(codeVerifier)));
+    params.put("code_challenge_method", "S256");
+});"""
+
+FIX_CSRF_JWT_COOKIE = """// A browser sends authentication cookies automatically, so keep CSRF enabled.
+http.csrf(csrf -> csrf
+    .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()));
+// Alternatively, use an Authorization: Bearer header instead of an auth cookie."""
+
+FIX_IDOR_AUTHZ = """// Scope the lookup to the authenticated owner/tenant instead of a bare ID.
+@PreAuthorize("#owner == authentication.name")
+public Order getOrder(Long id, String owner) {
+    return repository.findByIdAndOwnerId(id, owner).orElseThrow();
+}"""
+
+FIX_COVERAGE_CONTROLS = """// Make required controls explicit at the boundary and service layer.
+@PreAuthorize("hasAuthority('orders:write') and @orderAccess.canUpdate(#id, authentication)")
+public Order updateOrder(Long id, @Valid UpdateOrderRequest request) {
+    Order order = repository.findByIdAndTenantId(id, currentTenantId()).orElseThrow();
+    Order updated = applyValidatedUpdate(order, request);
+    auditService.recordOrderUpdate(authentication.getName(), id);
+    return repository.save(updated);
+}
+// Apply throttling to authentication, token, and password-reset entry points."""
+
+FIX_EMBEDDED_JOSE_KEY = """// Do not trust jwk/x5c key material supplied by the token.
+// Resolve only a validated kid against a server-configured, pinned key set.
+NimbusJwtDecoder decoder = NimbusJwtDecoder
+    .withJwkSetUri("https://auth.example.com/.well-known/jwks.json")
+    .build();"""
+
+FIX_AUTHZ_ORDER = """// Put specific rules before broad fallbacks.
+auth.requestMatchers("/admin/**").hasRole("ADMIN")
+    .requestMatchers("/public/**").permitAll()
+    .anyRequest().authenticated();"""
+
+FIX_REDIRECT_EXACT = """// Normalize and compare the complete pre-registered redirect URI.
+URI requested = URI.create(redirectUri).normalize();
+if (!registeredRedirectUris.contains(requested.toString())) {
+    throw new IllegalArgumentException("Unregistered redirect_uri");
+}"""
+
+FIX_TLS_MODERN = """SSLContext context = SSLContext.getInstance("TLSv1.3");
+// Permit only deployment-approved TLS 1.2/1.3 cipher suites and use the default
+// trust manager/hostname verifier. Enable certificate revocation checking."""
+
+FIX_TOKEN_PURPOSE = """// Validate token purpose before constructing Authentication.
+String type = jwt.getClaimAsString("token_use");
+if (!"access".equals(type)) throw new BadCredentialsException("wrong token type");
+// For OIDC ID tokens also validate azp when aud contains multiple entries."""
+
+FIX_REFRESH_LIFECYCLE = """// Rotate refresh tokens atomically and revoke the consumed token.
+RefreshToken replacement = refreshTokens.rotateAndRevoke(oldRefreshToken);
+// On logout, revoke/delete every refresh-token family for the authenticated session."""
+
+FIX_FILTER_CHAINS = """// Put specific filter chains first and keep an explicit fallback chain.
+@Bean @Order(1)
+SecurityFilterChain api(HttpSecurity http) { return http.securityMatcher("/api/**").build(); }
+@Bean @Order(99)
+SecurityFilterChain fallback(HttpSecurity http) {
+    return http.authorizeHttpRequests(a -> a.anyRequest().authenticated()).build();
+}"""
+
+FIX_TENANT_AUTHZ = """// Derive tenant scope from the authenticated principal, never from request data alone.
+String tenant = ((TenantPrincipal) authentication.getPrincipal()).tenantId();
+return repository.findByIdAndTenantId(id, tenant).orElseThrow();"""
+
+FIX_NESTED_JWT = """// After decrypting a nested JWT, parse and verify the inner signed JWT.
+SignedJWT inner = payload.toSignedJWT();
+if (inner == null || !inner.verify(trustedVerifier)) throw new BadJOSEException("invalid inner JWS");
+// Then validate issuer, audience, type and timestamps."""
+
+FIX_DPOP = """// Validate every DPoP proof component and reject replay.
+validateHtmAndHtu(proof, request);
+validateIat(proof, Duration.ofMinutes(5));
+replayCache.putIfAbsent(proof.getJWTID(), proof.getIssueTime());
+validateAth(proof, accessToken);
+validateNonceWhenRequired(proof, expectedNonce);"""
+
+FIX_PASSWORD_RESET = """// Generate a random, one-time, short-lived reset token.
+byte[] value = new byte[32];
+new SecureRandom().nextBytes(value);
+resetTokens.save(hash(value), Instant.now().plus(Duration.ofMinutes(15)), false);
+// Atomically mark/delete it when the password is changed."""
+
 FIX_METHOD_SEC = """// enable on a config class
 @Configuration
 @EnableMethodSecurity(prePostEnabled = true, securedEnabled = true)
@@ -680,8 +856,9 @@ SS_F = r"(?:false|Boolean\s*\.\s*FALSE)"
 SS_RULES: List[Rule] = [
     # ---- CSRF ----
     Rule("SpringSecurityCheck-CSRF-DISABLED", "CSRF protection disabled",
-         re.compile(r"\.csrf\s*\(\s*(?:c\s*->|csrf\s*->)?\s*(?:c|csrf)\s*\.\s*disable\s*\(\s*\)|"
-                    r"\.csrf\s*\(\s*AbstractHttpConfigurer\s*::\s*disable\s*\)", re.I),
+         re.compile(r"\.csrf\s*\(\s*\)\s*\.\s*disable\s*\(\s*\)|"
+                    r"\.csrf\s*\(\s*(?:(?:c|csrf)\s*->\s*(?:c|csrf)\s*\.\s*disable\s*\(\s*\)|"
+                    r"AbstractHttpConfigurer\s*::\s*disable)\s*\)", re.I),
          "HIGH", [], [],
          "CSRF is completely disabled. REST APIs can be stateless + JWT - then it is "
          "legitimate, but must be documented explicitly.",
@@ -885,6 +1062,304 @@ SS_RULES: List[Rule] = [
          "Public clients without PKCE are vulnerable to authorization-code interception.",
          always_report=True, kind="antipattern"),
 
+    Rule("OAUTH2-PKCE-PLAIN", "OAuth2 PKCE uses the plain challenge method",
+         re.compile(
+             r"(?:code[_-]?challenge[_-]?method|CODE_CHALLENGE_METHOD)"
+             r"[^;\n]{0,120}?[\x22\x27]plain[\x22\x27]|"
+             r"\.codeChallengeMethod\s*\(\s*(?:[\x22\x27]plain[\x22\x27]|"
+             r"(?:CodeChallengeMethod|PkceMethod)\s*\.\s*PLAIN)\s*\)|"
+             r"(?:CodeChallengeMethod|PkceMethod)\s*\.\s*PLAIN",
+             re.I),
+         "HIGH", [], [],
+         "PKCE plain sends a challenge equivalent to the verifier and does not protect "
+         "against authorization-code interception. RFC 7636 clients should use S256.",
+         always_report=True, kind="antipattern", fix=FIX_PKCE_S256),
+
+    Rule("OAUTH2-REDIRECT-PREFIX-MATCH", "OAuth2 redirect URI validated by prefix/substring",
+         re.compile(
+             r"\b(?:redirectUri|redirect_uri|callbackUri|callbackUrl|returnUrl|registeredRedirect\w*)"
+             r"\s*\.\s*(?:startsWith|contains)\s*\(",
+             re.I),
+         "HIGH", [], [],
+         "Prefix or substring matching can accept attacker-controlled hosts such as "
+         "trusted.example.evil.example. Compare a normalized URI against an exact allowlist.",
+         always_report=True, kind="antipattern", fix=FIX_REDIRECT_EXACT),
+
+    Rule("OAUTH2-TOKEN-QUERY-PARAM", "OAuth2 access token placed in a URL query parameter",
+         re.compile(
+             r"(?:queryParam|addQueryParameter|addParameter)\s*\(\s*"
+             r"(?:OAuth2ParameterNames\s*\.\s*ACCESS_TOKEN|[\x22\x27]access_token[\x22\x27])|"
+             r"[?&]access_token\s*=|access_token\s*=\s*[\x22\x27]\s*\+",
+             re.I),
+         "HIGH", [], [],
+         "Access tokens in URLs leak through browser history, referrers, proxies, and access logs.",
+         always_report=True, kind="antipattern",
+         fix="Send the access token in the Authorization: Bearer header, never in the URL."),
+
+    Rule("OAUTH2-CLIENT-SECRET-URL", "OAuth2 client secret placed in a URL query parameter",
+         re.compile(
+             r"(?:queryParam|addQueryParameter|addParameter)\s*\(\s*"
+             r"(?:OAuth2ParameterNames\s*\.\s*CLIENT_SECRET|[\x22\x27]client_secret[\x22\x27])|"
+             r"[?&]client_secret\s*=|client_secret\s*=\s*[\x22\x27]\s*\+",
+             re.I),
+         "CRITICAL", [], [],
+         "OAuth2 client secrets in URLs are exposed to logs, monitoring, caches, and referrers.",
+         always_report=True, kind="antipattern",
+         fix="Use the token endpoint's authenticated POST mechanism; never put client_secret in a URL."),
+
+    Rule("OAUTH2-STATE-MISSING", "OAuth2 authorization flow without CSRF state parameter",
+         # Fires when an authorization request builder is called without .state(...)
+         re.compile(
+             r"OAuth2AuthorizationRequest\s*\.\s*(?:authorizationCode|implicit)\s*\(\s*\)"
+             r"(?:(?!\.state\s*\().){0,400}"
+             r"\.(?:build|authorizationRequestUri)\s*\(",
+             re.I | re.S),
+         "HIGH", [], [],
+         "An OAuth2 authorization request is built without a state parameter. "
+         "The state parameter is required to prevent CSRF attacks against the "
+         "authorization callback endpoint.",
+         always_report=True, kind="antipattern",
+         fix="Set a cryptographically random state on every authorization request: "
+             ".state(UUID.randomUUID().toString()) and verify it in the callback."),
+
+    Rule("OAUTH2-TOKEN-LOGGING", "OAuth2 Bearer token written to a logger",
+         # Flags logger calls that include a variable or expression matching common
+         # token/bearer naming conventions - the token ends up in log files.
+         re.compile(
+             r"(?:log|logger|LOG|LOGGER)\s*\.\s*(?:debug|info|warn|error|trace)\s*\("
+             r"[^;\n]{0,200}"
+             r"(?:accessToken|bearerToken|idToken|jwtToken|token|Authorization)",
+             re.I),
+         "HIGH", [], [],
+         "A Bearer or access token is written to a logger. Log files are often "
+         "shipped to monitoring systems and retained for extended periods, "
+         "turning every log consumer into a token store for attackers.",
+         always_report=True, kind="sink",
+         fix="Never log token values. Log only non-sensitive metadata (token type, "
+             "subject claim, expiry timestamp). If debugging is required, mask the "
+             "token: token.substring(0, 8) + \"...\"."),
+
+    Rule("OAUTH2-INTROSPECTION-HTTP", "Token introspection endpoint uses plain HTTP",
+         re.compile(
+             r"(?:introspectionUri|setIntrospectionUri|introspection-uri)"
+             r"\s*[=(]\s*[\x22\x27]http://",
+             re.I),
+         "HIGH", [], [],
+         "The token introspection endpoint is configured over unencrypted HTTP. "
+         "An on-path attacker can intercept tokens and responses, "
+         "enabling token forgery and information disclosure.",
+         always_report=True, kind="antipattern",
+         fix="Use HTTPS with a valid certificate for the introspection endpoint. "
+             "Set spring.security.oauth2.resourceserver.opaque-token.introspection-uri "
+             "to an https:// URL."),
+
+    Rule("OAUTH2-SCOPE-HARDCODED", "OAuth2 scope list hardcoded in source",
+         # .scopes("openid","profile","email") or .scope("read") baked into Java/Kotlin
+         re.compile(
+             r"\.scopes?\s*\(\s*[\x22\x27](?:openid|profile|email|read|write|admin|"
+             r"offline.?access|https://)[\x22\x27]",
+             re.I),
+         "LOW", [], [],
+         "OAuth2 scopes are hardcoded in source rather than externalized to configuration. "
+         "Scope changes require a code change and redeployment instead of a config update.",
+         always_report=True, kind="antipattern",
+         fix="Externalize scope configuration to application.properties/yaml: "
+             "spring.security.oauth2.client.registration.<id>.scope=openid,profile"),
+
+    Rule("OIDC-NONCE-MISSING", "OIDC ID token nonce not validated",
+         # OidcIdTokenValidator or nonce check missing from the token validator chain
+         re.compile(
+             r"OidcUserService|OidcAuthorizationCodeAuthenticationProvider"
+             r"(?:(?!nonce|OidcIdTokenValidator).){0,600}"
+             r"\.setJwtDecoderFactory",
+             re.I | re.S),
+         "MEDIUM", [], [],
+         "The OIDC authentication flow does not appear to validate the nonce claim "
+         "in the ID token. Without nonce validation, replay attacks against the "
+         "authorization code flow are possible.",
+         always_report=True, kind="sink",
+         fix="Ensure OidcIdTokenValidator is included in the token validator chain "
+             "and that the nonce is generated per-request and stored in the session."),
+
+    # These four rules are emitted by method/module-aware analyzers below.  The
+    # impossible pattern keeps them in --list-rules and include/exclude filters
+    # without creating a second regex-only finding.
+    Rule("JWT-JKU-INJECTION", "JWT jku header controls remote key loading",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "An attacker-controlled jku header reaches a URL/JWKS loader.",
+         always_report=True, kind="antipattern", fix=FIX_JOSE_REMOTE_KEYS),
+    Rule("JWT-X5U-INJECTION", "JWT x5u header controls certificate loading",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "An attacker-controlled x5u header reaches a URL/certificate loader.",
+         always_report=True, kind="antipattern", fix=FIX_JOSE_REMOTE_KEYS),
+    Rule("SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE",
+         "CSRF disabled while JWT authentication uses cookies",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "Cookie-based authentication is sent automatically by browsers; disabling CSRF "
+         "therefore enables cross-site authenticated requests.",
+         always_report=True, kind="antipattern", fix=FIX_CSRF_JWT_COOKIE),
+    Rule("AUTHZ-IDOR-DATAFLOW", "Request identifier reaches repository without visible authorization",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A request path identifier reaches a repository ID lookup without visible owner, "
+         "tenant, principal, or method-security enforcement.",
+         always_report=True, kind="antipattern", fix=FIX_IDOR_AUTHZ),
+    Rule("JWT-EMBEDDED-JWK-TRUST", "JWT embedded jwk header trusted as verification key",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "Attacker-controlled jwk key material reaches signature verification.",
+         always_report=True, kind="antipattern", fix=FIX_EMBEDDED_JOSE_KEY),
+    Rule("JWT-X5C-TRUST", "JWT embedded x5c certificate chain trusted without a pinned root",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "Attacker-controlled x5c certificate material reaches signature verification.",
+         always_report=True, kind="antipattern", fix=FIX_EMBEDDED_JOSE_KEY),
+    Rule("AUTHZ-MATCHER-ORDER", "Broad permitAll matcher precedes a restrictive matcher",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "Spring Security uses first-match-wins semantics; an earlier broad permitAll can shadow a later rule.",
+         always_report=True, kind="antipattern", fix=FIX_AUTHZ_ORDER),
+    Rule("AUTHZ-PREAUTHORIZE-WITHOUT-METHODSECURITY",
+         "@PreAuthorize used without enabled method security",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "@PreAuthorize/@PostAuthorize annotations are ineffective unless method security is enabled.",
+         always_report=True, kind="antipattern", fix=FIX_METHOD_SEC),
+    Rule("OIDC-IDTOKEN-AS-ACCESS-TOKEN", "OIDC ID token used as an API Bearer token",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "An ID token authenticates a client session; it must not be used as an API access token.",
+         always_report=True, kind="antipattern", fix=FIX_TOKEN_PURPOSE),
+    Rule("OIDC-AZP-NOT-VALIDATED", "OIDC authorized party claim not validated",
+         re.compile(r"(?!)"), "MEDIUM", [], [],
+         "Custom OIDC audience validation does not visibly validate azp for multi-audience ID tokens.",
+         always_report=True, kind="antipattern", fix=FIX_TOKEN_PURPOSE),
+    Rule("JWT-TOKEN-TYPE-CONFUSION", "JWT accepted for authentication without purpose validation",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A parsed JWT is converted to Authentication without checking typ/token_use or equivalent purpose.",
+         always_report=True, kind="antipattern", fix=FIX_TOKEN_PURPOSE),
+    Rule("REFRESH-TOKEN-NO-ROTATION", "Refresh-token flow without visible rotation",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A refresh flow issues a new access token without visibly rotating and revoking the refresh token.",
+         always_report=True, kind="antipattern", fix=FIX_REFRESH_LIFECYCLE),
+    Rule("REFRESH-TOKEN-NO-REVOKE-ON-LOGOUT", "Logout does not visibly revoke refresh tokens",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "Refresh tokens appear in the module, but logout has no visible revocation/deletion step.",
+         always_report=True, kind="antipattern", fix=FIX_REFRESH_LIFECYCLE),
+    Rule("AUTHZ-SECURITYFILTERCHAIN-ORDER", "SecurityFilterChain order shadows a specific chain",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "An earlier broad SecurityFilterChain can consume requests before a later specific chain.",
+         always_report=True, kind="antipattern", fix=FIX_FILTER_CHAINS),
+    Rule("AUTHZ-FILTERCHAIN-NO-FALLBACK", "Scoped SecurityFilterChain set has no fallback chain",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "User-defined scoped filter chains have no catch-all fallback for unmatched requests.",
+         always_report=True, kind="antipattern", fix=FIX_FILTER_CHAINS),
+    Rule("AUTHZ-TENANT-DATAFLOW", "Request tenant scope reaches or is dropped before repository access",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "Request-controlled tenant context crosses service calls without binding to the authenticated tenant.",
+         always_report=True, kind="antipattern", fix=FIX_TENANT_AUTHZ),
+    Rule("SECURITY-CONTROL-COVERAGE-GAP", "Required security-control coverage is missing or unresolved",
+         re.compile(r"(?!)"), "MEDIUM", [], [],
+         "At least one required security control is missing or unresolved on an externally reachable processing path.",
+         always_report=True, kind="antipattern", fix=FIX_COVERAGE_CONTROLS),
+    Rule("AUTHZ-SENSITIVE-SINK-UNCOVERED", "Sensitive processing path lacks authorization",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "An externally reachable path can reach a sensitive repository or state-changing operation "
+         "without a proven authorization decision.",
+         always_report=True, kind="antipattern", fix=FIX_COVERAGE_CONTROLS),
+    Rule("AUTHZ-PARTIALLY-PROTECTED-SERVICE", "Service is reachable from mixed authorization contexts",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "The same service method is reachable from both authorized and unauthorized entry points.",
+         always_report=True, kind="antipattern", fix=FIX_COVERAGE_CONTROLS),
+    Rule("TENANT-CONTEXT-LOST", "Tenant context is not bound on a sensitive path",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "Tenant-scoped input reaches sensitive processing without a proven authenticated-tenant binding.",
+         always_report=True, kind="antipattern", fix=FIX_TENANT_AUTHZ),
+    Rule("VALIDATION-COVERAGE-GAP", "External input reaches processing without proven validation",
+         re.compile(r"(?!)"), "MEDIUM", [], [],
+         "Request or message payload data reaches application processing without visible validation.",
+         always_report=True, kind="antipattern", fix=FIX_COVERAGE_CONTROLS),
+    Rule("RATE-LIMIT-COVERAGE-GAP", "Abuse-sensitive entry point lacks throttling",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A login, token, MFA, or password-reset entry point has no visible rate limit or lockout control.",
+         always_report=True, kind="antipattern", fix=FIX_COVERAGE_CONTROLS),
+    Rule("AUDIT-COVERAGE-GAP", "Sensitive state change lacks security audit evidence",
+         re.compile(r"(?!)"), "MEDIUM", [], [],
+         "A sensitive state-changing path has no visible structured security audit event.",
+         always_report=True, kind="antipattern", fix=FIX_COVERAGE_CONTROLS),
+    Rule("OAUTH2-ISSUER-MIXUP", "Multi-issuer OAuth callback lacks issuer binding",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "Multiple authorization issuers are configured without visible request-to-callback issuer binding.",
+         always_report=True, kind="antipattern", fix=FIX_TOKEN_PURPOSE),
+    Rule("JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED", "Nested JWT inner signature not validated",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "A decrypted nested JWT is consumed without visible inner JWS signature verification.",
+         always_report=True, kind="antipattern", fix=FIX_NESTED_JWT),
+    Rule("JWE-ZIP-ENABLED", "JWE compression enabled before encryption",
+         re.compile(r"(?:setCompressionAlgorithm|compressionAlgorithm)\s*\([^;\n]{0,120}"
+                    r"(?:CompressionAlgorithmIdentifiers\s*\.\s*DEF|[\x22\x27]DEF[\x22\x27])|"
+                    r"customParam\s*\(\s*[\x22\x27]zip[\x22\x27]\s*,\s*[\x22\x27]DEF[\x22\x27]\s*\)|"
+                    r"[\x22\x27]zip[\x22\x27]\s*[,=:]\s*[\x22\x27]DEF[\x22\x27]", re.I),
+         "MEDIUM", [], [],
+         "Compression before encryption can expose plaintext-length relationships and should be avoided.",
+         always_report=True, kind="antipattern",
+         fix="Do not set the JWE zip header; encrypt the uncompressed payload."),
+    Rule("JWT-KEY-ISSUER-NOT-BOUND", "JWT verification key selection not bound to issuer",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A custom kid/key resolver has no visible binding between trusted issuer and key set.",
+         always_report=True, kind="antipattern", fix=FIX_EMBEDDED_JOSE_KEY),
+    Rule("JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES", "Same signing key used for multiple JWT types",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "Access, ID, and refresh tokens share signing material, weakening token-type separation.",
+         always_report=True, kind="antipattern", fix=FIX_TOKEN_PURPOSE),
+    Rule("CERT-PRIVATE-KEY-COMMITTED", "Private key material committed in source",
+         re.compile(r"-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH)\s+)?PRIVATE KEY-----", re.I),
+         "CRITICAL", [], [],
+         "Private key material is present in a scanned source/configuration file.",
+         always_report=True, kind="antipattern",
+         fix="Remove and rotate the key immediately; load replacement material from a secret manager."),
+    Rule("CERT-EMPTY-PKCS12-PASSWORD", "PKCS12 keystore loaded with an empty password",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A PKCS12 keystore appears to be loaded or written with null/empty password protection.",
+         always_report=True, kind="antipattern",
+         fix="Protect PKCS12 files with a strong runtime secret and restrict filesystem permissions."),
+    Rule("PASSWORD-RESET-NO-EXPIRY", "Password-reset token has no visible expiry",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A password-reset token is generated or stored without a visible expiry/TTL.",
+         always_report=True, kind="antipattern", fix=FIX_PASSWORD_RESET),
+    Rule("PASSWORD-RESET-TOKEN-REUSE", "Password-reset token is not consumed atomically",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A password-reset flow changes a password without deleting or marking the token used.",
+         always_report=True, kind="antipattern", fix=FIX_PASSWORD_RESET),
+    Rule("PASSWORD-RESET-PREDICTABLE-TOKEN", "Predictable password-reset token generation",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "Password-reset token material comes from a predictable timestamp or non-cryptographic RNG.",
+         always_report=True, kind="antipattern", fix=FIX_PASSWORD_RESET),
+    Rule("AUTH-LOGIN-NO-RATE-LIMIT", "Login endpoint has no visible throttling or lockout",
+         re.compile(r"(?!)"), "MEDIUM", [], [],
+         "A custom login/authentication endpoint has no visible rate limit, delay, or account lockout.",
+         always_report=True, kind="antipattern",
+         fix="Apply per-account and per-origin throttling and temporary lockout outside credential comparison."),
+    Rule("MFA-FAIL-OPEN", "MFA verification fails open on errors",
+         re.compile(r"(?!)"), "CRITICAL", [], [],
+         "An exception or unavailable MFA service appears to allow authentication to continue.",
+         always_report=True, kind="antipattern",
+         fix="Fail closed: deny authentication whenever MFA verification cannot complete successfully."),
+    Rule("DPOP-JTI-NOT-REPLAY-CHECKED", "DPoP jti not checked for replay",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "DPoP validation lacks a visible jti replay cache/uniqueness check.",
+         always_report=True, kind="antipattern", fix=FIX_DPOP),
+    Rule("DPOP-HTM-HTU-NOT-VALIDATED", "DPoP HTTP method/URI not fully validated",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "DPoP proof validation does not visibly bind both htm and htu to the request.",
+         always_report=True, kind="antipattern", fix=FIX_DPOP),
+    Rule("DPOP-IAT-WINDOW-TOO-LARGE", "DPoP proof acceptance window exceeds five minutes",
+         re.compile(r"(?!)"), "MEDIUM", [], [],
+         "The configured DPoP iat acceptance window is larger than five minutes.",
+         always_report=True, kind="antipattern", fix=FIX_DPOP),
+    Rule("DPOP-ATH-NOT-VALIDATED", "DPoP access-token hash not validated",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "A DPoP-bound access-token flow lacks visible ath validation.",
+         always_report=True, kind="antipattern", fix=FIX_DPOP),
+    Rule("DPOP-NONCE-NOT-VALIDATED", "Configured DPoP nonce not validated",
+         re.compile(r"(?!)"), "HIGH", [], [],
+         "DPoP nonce support is configured or emitted without visible proof nonce validation.",
+         always_report=True, kind="antipattern", fix=FIX_DPOP),
+
     # ---- Method Security ----
     Rule("SpringSecurityCheck-NO-METHOD-SECURITY", "@EnableMethodSecurity missing",
          re.compile(r"@EnableWebSecurity", re.I),
@@ -972,6 +1447,64 @@ SS_RULES: List[Rule] = [
          fix=FIX_AUTH),
 
     # ---- Anti-patterns: explicitly insecure configurations ----
+    Rule("TLS-OLD-PROTOCOL", "Obsolete SSL/TLS protocol explicitly enabled",
+         re.compile(
+             r"SSLContext\s*\.\s*getInstance\s*\(\s*[\x22\x27](?:SSLv?2|SSLv3|TLSv1(?:\.0|\.1)?)[\x22\x27]\s*\)|"
+             r"(?:setEnabledProtocols|setProtocols|protocols?)\s*\([^;\n]{0,200}"
+             r"[\x22\x27](?:SSLv?2|SSLv3|TLSv1(?:\.0|\.1)?)[\x22\x27]",
+             re.I),
+         "HIGH", [], [],
+         "SSLv2/SSLv3/TLS 1.0/TLS 1.1 are obsolete and must not be explicitly enabled.",
+         always_report=True, kind="antipattern", fix=FIX_TLS_MODERN),
+    Rule("TLS-WEAK-CIPHER", "Weak TLS cipher suite explicitly enabled",
+         re.compile(
+             r"[\x22\x27](?:SSL|TLS)_[A-Z0-9_]*(?:RC4|3DES|DES_EDE|_DES_|NULL|EXPORT|ANON|anon)[A-Z0-9_]*[\x22\x27]",
+             re.I),
+         "HIGH", [], [],
+         "RC4, DES/3DES, NULL, EXPORT, and anonymous TLS suites do not provide modern transport security.",
+         always_report=True, kind="antipattern", fix=FIX_TLS_MODERN),
+    Rule("TLS-TRUST-SELF-SIGNED", "Self-signed certificates trusted without pinning",
+         re.compile(r"\bTrustSelfSignedStrategy\b|"
+                    r"loadTrustMaterial\s*\([^;\n]{0,200}(?:isSelfSigned|selfSigned)", re.I),
+         "HIGH", [], [],
+         "Trusting arbitrary self-signed certificates removes public/private CA identity guarantees.",
+         always_report=True, kind="antipattern", fix=FIX_TLS_MODERN),
+    Rule("TLS-REVOCATION-DISABLED", "Certificate revocation checking explicitly disabled",
+         re.compile(r"setRevocationEnabled\s*\(\s*false\s*\)|"
+                    r"(?:com\.sun\.net\.ssl\.checkRevocation|ocsp\.enable)\s*[\x22\x27]?\s*[,=:]\s*[\x22\x27]?false", re.I),
+         "HIGH", [], [],
+         "Certificate revocation checking is explicitly disabled; revoked credentials may remain trusted.",
+         always_report=True, kind="antipattern", fix=FIX_TLS_MODERN),
+    Rule("TLS-MTLS-WANT-INSTEAD-OF-NEED", "mTLS client certificate is optional instead of required",
+         re.compile(r"setWantClientAuth\s*\(\s*true\s*\)|"
+                    r"setNeedClientAuth\s*\(\s*false\s*\)|"
+                    r"ClientAuth\s*\.\s*(?:OPTIONAL|WANT)\b", re.I),
+         "HIGH", [], [],
+         "Optional client authentication permits connections without a client certificate.",
+         always_report=True, kind="antipattern",
+         fix="For mTLS-only endpoints require client certificates with setNeedClientAuth(true) or ClientAuth.REQUIRE."),
+    Rule("TLS-KEYSTORE-PASSWORD-HARDCODED", "Hardcoded TLS keystore password",
+         re.compile(
+             r"(?:keyStorePassword|keystorePassword|setKeyStorePassword)\s*(?:=|\()\s*"
+             r"[\x22\x27][^\x22\x27${}]{3,}[\x22\x27]|"
+             r"[\x22\x27]javax\.net\.ssl\.keyStorePassword[\x22\x27]\s*,\s*"
+             r"[\x22\x27][^\x22\x27${}]{3,}[\x22\x27]",
+             re.I),
+         "HIGH", [], [],
+         "A keystore password is embedded in source code and cannot be rotated safely.",
+         always_report=True, kind="antipattern",
+         fix="Load the keystore password from a secret manager or protected runtime secret."),
+    Rule("TLS-TRUSTSTORE-PASSWORD-HARDCODED", "Hardcoded TLS truststore password",
+         re.compile(
+             r"(?:trustStorePassword|truststorePassword|setTrustStorePassword)\s*(?:=|\()\s*"
+             r"[\x22\x27][^\x22\x27${}]{3,}[\x22\x27]|"
+             r"[\x22\x27]javax\.net\.ssl\.trustStorePassword[\x22\x27]\s*,\s*"
+             r"[\x22\x27][^\x22\x27${}]{3,}[\x22\x27]",
+             re.I),
+         "MEDIUM", [], [],
+         "A truststore password is embedded in source code and should be externalized.",
+         always_report=True, kind="antipattern",
+         fix="Load the truststore password from a secret manager or protected runtime secret."),
     Rule("SpringSecurityCheck-ANTI-TRUST-ALL-CERTS", "SSL certificate validation disabled",
          re.compile(r"setSSLSocketFactory\s*\(.*?TrustAll|"
                     r"TrustAllStrategy|TRUST_ALL_HOSTNAME|"
@@ -1025,6 +1558,35 @@ PROP_RULES: List[Tuple[str, re.Pattern, str, str, str]] = [
             "Placeholders such as ${DB_PASSWORD} are not flagged.", ""),
     ("SpringSecurityCheck-PROP-SSL-DISABLED", re.compile(r"server\.ssl\.enabled\s*[=:]\s*false", re.I),
      "HIGH", "TLS/HTTPS explicitly disabled - all data is transmitted unencrypted.", ""),
+    ("TLS-OLD-PROTOCOL", re.compile(
+        r"(?:server\.ssl\.(?:enabled-)?protocols|https\.protocols|jdk\.tls\.client\.protocols)"
+        r"\s*[=:][^\n]*(?:SSLv?2|SSLv3|TLSv1(?:\.0|\.1)?)(?:[,\s]|$)", re.I),
+     "HIGH", "Obsolete SSL/TLS protocol explicitly enabled in configuration.", FIX_TLS_MODERN),
+    ("TLS-WEAK-CIPHER", re.compile(
+        r"(?:server\.ssl\.ciphers|https\.cipherSuites)\s*[=:][^\n]*"
+        r"(?:RC4|3DES|DES_EDE|_DES_|NULL|EXPORT|anon)", re.I),
+     "HIGH", "Weak TLS cipher suite explicitly enabled in configuration.", FIX_TLS_MODERN),
+    ("TLS-REVOCATION-DISABLED", re.compile(
+        r"(?:com\.sun\.net\.ssl\.checkRevocation|ocsp\.enable)\s*[=:]\s*false", re.I),
+     "HIGH", "Certificate revocation checking explicitly disabled.", FIX_TLS_MODERN),
+    ("TLS-MTLS-WANT-INSTEAD-OF-NEED", re.compile(
+        r"server\.ssl\.client-auth\s*[=:]\s*(?:want|optional)", re.I),
+     "HIGH", "Client certificates are optional although mTLS appears configured.",
+     "Use server.ssl.client-auth=need for mTLS-only endpoints."),
+    ("TLS-KEYSTORE-PASSWORD-HARDCODED", re.compile(
+        r"(?:server\.ssl\.key-store-password|javax\.net\.ssl\.keyStorePassword)\s*[=:]\s*"
+        r"(?!\s*(?:\$\{|#\{|ENC\(|\s*$))\S+", re.I),
+     "HIGH", "Hardcoded TLS keystore password in configuration.",
+     "Use a runtime secret placeholder or secret manager."),
+    ("TLS-TRUSTSTORE-PASSWORD-HARDCODED", re.compile(
+        r"(?:server\.ssl\.trust-store-password|javax\.net\.ssl\.trustStorePassword)\s*[=:]\s*"
+        r"(?!\s*(?:\$\{|#\{|ENC\(|\s*$))\S+", re.I),
+     "MEDIUM", "Hardcoded TLS truststore password in configuration.",
+     "Use a runtime secret placeholder or secret manager."),
+    ("CERT-PRIVATE-KEY-COMMITTED", re.compile(
+        r"-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH)\s+)?PRIVATE KEY-----", re.I),
+     "CRITICAL", "Private key material embedded in application configuration.",
+     "Remove and rotate the key; load it from a secret manager."),
     ("SpringSecurityCheck-PROP-MGMT-SEC-OFF", re.compile(r"management\.security\.enabled\s*[=:]\s*false", re.I),
      "CRITICAL", "Spring Boot 1.x: actuator security completely turned off.", FIX_ACTUATOR),
     ("SpringSecurityCheck-PROP-STACKTRACE", re.compile(r"server\.error\.include-(?:stacktrace|message)\s*[=:]\s*always", re.I),
@@ -1195,6 +1757,22 @@ class Finding:
     # Deliberately NOT part of the fingerprint: reformatting a neighbouring
     # line must not invalidate an existing baseline or triage decision.
     context: List[Tuple[int, str]] = field(default_factory=list)
+
+
+@dataclass
+class CoverageEntry:
+    """Security-control coverage for one externally reachable entry point."""
+    entrypoint: str
+    kind: str
+    file: str
+    line: int
+    method: str
+    http_method: str = ""
+    route: str = ""
+    controls: Dict[str, str] = field(default_factory=dict)
+    evidence: Dict[str, List[str]] = field(default_factory=dict)
+    flow: List[str] = field(default_factory=list)
+    sensitive_sinks: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1658,6 +2236,137 @@ def _helper_xml_guards(body):
         return set()
     guards, _ = _xml_guard_evidence(text, masked, bounds, assignment.start(), variable)
     return guards
+
+
+
+def _check_kid_injection(path: str, lines: list, raw_lines: list,
+                         methods: list, context_radius: int) -> list:
+    """Cross-line taint check: kid JWT header claim flows into a dangerous sink.
+
+    Sources:  getHeader("kid"), claims.get("kid"), JwtHeader.getKeyId(),
+              Jwt.getHeaders().get("kid"), NimbusJwt/SignedJWT.getHeader().getKeyID()
+    Sinks:    DB (query/prepareStatement/nativeQuery/execute/prepareCall/NamedQuery),
+              File (new File / Paths.get / FileReader / FileInputStream / readAllBytes),
+              OS cmd (Runtime.exec / ProcessBuilder),
+              JNDI (lookup), LDAP (search/bind), SSRF (RestTemplate/WebClient/URL/URI),
+              Crypto key load (MessageDigest.getInstance / Cipher.getInstance / KeyFactory),
+              JDBC URL (DriverManager.getConnection)
+    Passes:   3 passes - (1) source→same-line sink, (2) source→var, var→sink,
+              (3) kid var passed through a helper/builder method that then hits a sink.
+
+    CVE-2018-0114 class: https://github.com/ticarpi/jwt_tool (KID injection playbook)
+    """
+    import re as _re
+    findings_out = []
+
+    # ── Sources ──────────────────────────────────────────────────────────────
+    KID_SOURCE = _re.compile(
+        # jjwt: claims.get("kid") / getClaims().get("kid") / getHeader("kid")
+        r"(?:getHeader|header\s*\(\s*)[\x22\x27]kid[\x22\x27]|"
+        r"\.getClaims\(\)[^;\n]{0,100}\.get\s*\(\s*[\x22\x27]kid[\x22\x27]|"
+        r"claims\s*\.\s*get\s*\(\s*[\x22\x27]kid[\x22\x27]|"
+        # Spring Security OAuth2 JWT: jwt.getHeaders().get("kid") / Jwt.getHeader("kid")
+        r"\.getHeaders\s*\(\s*\)[^;\n]{0,80}\.get\s*\(\s*[\x22\x27]kid[\x22\x27]|"
+        r"\.getHeader\s*\(\s*[\x22\x27]kid[\x22\x27]|"
+        # Nimbus: SignedJWT.getHeader().getKeyID() / JWSHeader.getKeyID()
+        r"\.getKeyID\s*\(\s*\)|"
+        r"JWSHeader[^;\n]{0,60}\.getKeyID\s*\(\s*\)",
+        _re.I)
+
+    # ── Sinks ─────────────────────────────────────────────────────────────────
+    KID_SINK = _re.compile(
+        # DB
+        r"\.(?:query|nativeQuery|execute|prepareStatement|prepareCall|"
+        r"createNativeQuery|createQuery|find|findById)\s*\(|"
+        r"\.(?:createNamedQuery|createSQLQuery)\s*\(|"
+        # File
+        r"new\s+(?:java\.io\.)?File\s*\(|(?:java\.nio\.file\.)?Paths\s*\.\s*get\s*\(|"
+        r"new\s+(?:java\.io\.)?FileReader\s*\(|new\s+(?:java\.io\.)?FileInputStream\s*\(|"
+        r"\.readAllBytes\s*\(|Files\s*\.\s*(?:read|newInput)\s*\(|"
+        # OS
+        r"Runtime\s*\.\s*exec\s*\(|ProcessBuilder\s*\(|"
+        # JNDI / LDAP
+        r"\.lookup\s*\(|ctx\s*\.\s*search\s*\(|ctx\s*\.\s*bind\s*\(|"
+        r"new\s+InitialDirContext\s*\(|new\s+InitialLdapContext\s*\(|"
+        # SSRF
+        r"new\s+URL\s*\(|URI\s*\.\s*create\s*\(|"
+        r"restTemplate\s*\.\s*(?:getFor|postFor|exchange|execute)|"
+        r"webClient\s*\.\s*(?:get|post|put|delete)\s*\(|"
+        # Crypto key load (key confusion)
+        r"MessageDigest\s*\.\s*getInstance\s*\(|"
+        r"Cipher\s*\.\s*getInstance\s*\(|"
+        r"KeyFactory\s*\.\s*getInstance\s*\(|"
+        # JDBC
+        r"DriverManager\s*\.\s*getConnection\s*\(",
+        _re.I)
+
+    # ── Taint tracking ────────────────────────────────────────────────────────
+    kid_vars: set = set()         # variables assigned from a kid source
+    kid_taint_vars: set = set()   # variables that receive a kid_var as argument
+
+    def _make_finding(line_idx: int, rule_name: str, note: str) -> "Finding":
+        code = raw_lines[line_idx].strip()[:200] if line_idx < len(raw_lines) else ""
+        return Finding(
+            file=path, line=line_idx + 1,
+            rule_id="JWT-KID-INJECTION",
+            rule_name=rule_name,
+            severity="HIGH", status="VULNERABLE",
+            code=code,
+            note=note,
+            fingerprint=fingerprint(path, "JWT-KID-INJECTION", code),
+            context=context_lines(raw_lines, line_idx + 1, context_radius),
+            fix="Never use the kid claim value directly in a DB query, file path, "
+                "OS command, JNDI lookup, SSRF call, or crypto-algorithm selector. "
+                "Maintain a fixed key registry (a validated Map<String,Key>) and "
+                "look up keys by a safe internal identifier, not by the raw kid string.",
+        )
+
+    # Pass 1: source on the same line as a sink → immediate finding
+    # Pass 1 also: collect variables assigned from kid sources
+    for i, line in enumerate(lines):
+        m = KID_SOURCE.search(line)
+        if m:
+            assign = re.search(r"(?:String|Object|var|Key|byte\[\])\s+(\w+)\s*=", line)
+            if assign:
+                kid_vars.add(assign.group(1))
+            if KID_SINK.search(line):
+                findings_out.append(_make_finding(
+                    i, "JWT kid claim used directly in a sink",
+                    "The kid JWT header field is attacker-controlled and flows directly "
+                    "into a dangerous sink on the same line (SQLi, path traversal, RCE, "
+                    "JNDI/LDAP injection, SSRF, or key confusion). CVE-2018-0114 class."))
+
+    # Pass 2: kid variable flows into a sink (possibly many lines later)
+    if kid_vars:
+        var_re = re.compile(r"\b(" + "|".join(re.escape(v) for v in kid_vars) + r")\b")
+        for i, line in enumerate(lines):
+            if var_re.search(line):
+                # Track variables that receive a kid var as argument
+                passthrough = re.search(
+                    r"(?:String|Object|var|Key|byte\[\])\s+(\w+)\s*=[^;\n]{0,200}\b("
+                    + "|".join(re.escape(v) for v in kid_vars) + r")\b", line)
+                if passthrough:
+                    kid_taint_vars.add(passthrough.group(1))
+                if KID_SINK.search(line):
+                    findings_out.append(_make_finding(
+                        i, "JWT kid claim flows into a sink (cross-line)",
+                        "A variable derived from the kid JWT header field reaches a "
+                        "dangerous sink. The kid value is attacker-controlled. "
+                        "CVE-2018-0114 class."))
+
+    # Pass 3: tainted passthrough variable reaches a sink
+    if kid_taint_vars:
+        taint_re = re.compile(
+            r"\b(" + "|".join(re.escape(v) for v in kid_taint_vars) + r")\b")
+        for i, line in enumerate(lines):
+            if taint_re.search(line) and KID_SINK.search(line):
+                findings_out.append(_make_finding(
+                    i, "JWT kid claim flows into a sink (tainted passthrough)",
+                    "A variable that received a kid-tainted value as an argument "
+                    "reaches a dangerous sink. The original kid value is attacker-controlled. "
+                    "CVE-2018-0114 class."))
+
+    return findings_out
 
 
 def analyze_file(path: str, raw_lines: List[str], lines: List[str], methods: List[Method],
@@ -2398,6 +3107,20 @@ def analyze_props_file(path: str, root: str) -> List[Finding]:
                 note=note, fingerprint=fp, fix=fix,
                 context=context_lines([l.rstrip("\n") for l in lines], idx),
             ))
+    content = "".join(lines)
+    if re.search(r"server\.ssl\.key-store-type\s*[=:]\s*PKCS12\b", content, re.I):
+        empty = re.search(r"^\s*server\.ssl\.key-store-password\s*[=:]\s*(?:#.*)?$",
+                          content, re.I | re.M)
+        if empty:
+            idx = content.count("\n", 0, empty.start()) + 1
+            raw = lines[idx - 1].strip() if 1 <= idx <= len(lines) else "server.ssl.key-store-password="
+            rid = "CERT-EMPTY-PKCS12-PASSWORD"
+            findings.append(Finding(
+                file=rel, line=idx, rule_id=rid, rule_name=rid,
+                severity="HIGH", status="ANTIPATTERN", code=raw[:200],
+                note="PKCS12 keystore is configured with an empty password.",
+                fix=RULE_BY_ID[rid].fix, fingerprint=fingerprint(rel, rid, raw),
+                context=context_lines([line.rstrip("\n") for line in lines], idx)))
     return findings
 
 
@@ -2458,6 +3181,19 @@ def colorize(text: str, key: str, enabled: bool) -> str:
 
 
 _VULN_CATEGORY_RULES: List[Tuple[str, str]] = [
+    ("JWT-", "JWT"),
+    ("JWE-", "JWT"),
+    ("HARDEN-JWT-", "JWT"),          # keep JWT badge for hardening sub-group too
+    ("OAUTH2-", "OAuth2/OIDC"), ("OIDC-", "OAuth2/OIDC"),
+    ("DPOP-", "OAuth2/OIDC"), ("REFRESH-TOKEN-", "OAuth2/OIDC"),
+    ("AUTHZ-", "Spring Security"), ("AUTH-", "Spring Security"),
+    ("SECURITY-CONTROL-", "Security Coverage"),
+    ("TENANT-CONTEXT-", "Security Coverage"),
+    ("VALIDATION-COVERAGE-", "Security Coverage"),
+    ("RATE-LIMIT-COVERAGE-", "Security Coverage"),
+    ("AUDIT-COVERAGE-", "Security Coverage"),
+    ("PASSWORD-", "Spring Security"), ("MFA-", "Spring Security"),
+    ("TLS-", "TLS/Certificates"), ("CERT-", "TLS/Certificates"),
     ("HARDEN-", "Hardening"),
     ("XXE-", "XXE"), ("ANTI-", "XXE"),
     ("DESER-", "Deserialization"), ("SRC-DESER", "Deserialization"),
@@ -2499,12 +3235,78 @@ def summary_counts(findings: List[Finding]) -> Dict[str, int]:
     return counts
 
 
+_COVERAGE_COLUMNS = (
+    ("authentication", "AuthN"), ("authorization", "AuthZ"),
+    ("tenant", "Tenant"), ("validation", "Validation"),
+    ("rate_limit", "Rate limit"), ("audit", "Audit"))
+_COVERAGE_MARK = {
+    "COVERED": "OK", "MISSING": "MISSING", "UNKNOWN": "UNKNOWN",
+    "NOT_REQUIRED": "N/A"}
+
+
+def coverage_summary(entries: Sequence[CoverageEntry]) -> Dict[str, int]:
+    counts = {"COVERED": 0, "MISSING": 0, "UNKNOWN": 0, "NOT_REQUIRED": 0}
+    for entry in entries:
+        for status in entry.controls.values():
+            counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def coverage_payload(entries: Sequence[CoverageEntry]) -> dict:
+    return {
+        "summary": coverage_summary(entries),
+        "legend": {
+            "COVERED": "The control is proven on the reachable path.",
+            "MISSING": "A required control is not visible on the reachable path.",
+            "UNKNOWN": "Static analysis cannot prove the control because configuration is dynamic or external.",
+            "NOT_REQUIRED": "The control is not required for the identified processing path.",
+        },
+        "entries": [asdict(entry) for entry in entries],
+    }
+
+
+def print_coverage_text(entries: Sequence[CoverageEntry], output_format: str = "table") -> None:
+    print("\nSecurity control coverage")
+    print("=========================")
+    if not entries:
+        print("No supported HTTP, listener, or scheduled entry points were found.")
+        return
+    if output_format == "json":
+        print(json.dumps(coverage_payload(entries), indent=2, ensure_ascii=False))
+        return
+    headers = ["Entry point"] + [label for _, label in _COVERAGE_COLUMNS]
+    rows = []
+    for entry in entries:
+        rows.append([entry.entrypoint] + [
+            _COVERAGE_MARK.get(entry.controls.get(key, "UNKNOWN"), "UNKNOWN")
+            for key, _ in _COVERAGE_COLUMNS])
+    widths = [min(64, max(len(headers[index]), *(len(row[index]) for row in rows)))
+              for index in range(len(headers))]
+    def render(row: Sequence[str]) -> str:
+        cells = []
+        for index, value in enumerate(row):
+            clipped = value if len(value) <= widths[index] else value[:widths[index] - 1] + "…"
+            cells.append(clipped.ljust(widths[index]))
+        return " | ".join(cells)
+    print(render(headers))
+    print("-+-".join("-" * width for width in widths))
+    for row in rows:
+        print(render(row))
+    counts = coverage_summary(entries)
+    print("Coverage summary: " + "  ".join(
+        f"{status}: {counts.get(status, 0)}"
+        for status in ("COVERED", "MISSING", "UNKNOWN", "NOT_REQUIRED")))
+
+
 def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bool,
-               show_fix: bool) -> None:
+               show_fix: bool, coverage: Optional[Sequence[CoverageEntry]] = None,
+               coverage_format: str = "table") -> None:
     print(f"JSpringGuard {VERSION} - {scanned} source file(s), {builds} build file(s), "
           f"{len(findings)} finding(s)\n")
     if not findings:
         print("No findings at the selected filters.")
+        if coverage is not None:
+            print_coverage_text(coverage, coverage_format)
         print(f"\nJSpringGuard v{VERSION} by {AUTHOR} - {REPO_URL}")
         return
 
@@ -2545,12 +3347,20 @@ def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bo
     counts = summary_counts(findings)
     print("Summary: " + "  ".join(
         f"{k}: {counts[k]}" for k in reversed(SEVERITY_LIST) if k in counts))
+    if coverage is not None:
+        print_coverage_text(coverage, coverage_format)
     print(f"\nJSpringGuard v{VERSION} by {AUTHOR} - {REPO_URL}")
 
 
 HTML_CSS = """
 .context-hit{display:inline-block;min-width:100%;background:var(--warn-soft);font-weight:bold}
 .source-context{white-space:pre;overflow-x:auto;max-height:420px;overflow-y:auto;border-radius:var(--r-sm)}
+.coverage-wrap{margin:22px 0 28px;padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);overflow-x:auto}
+.coverage-wrap h2{margin:0 0 12px;font-size:17px}.coverage-table{width:100%;border-collapse:collapse;min-width:820px}
+.coverage-table th,.coverage-table td{padding:8px 10px;border-bottom:1px solid var(--line-soft);text-align:left;font-size:12px}
+.coverage-table th{color:var(--dim);font-weight:600}.coverage-table code{white-space:nowrap}
+.cov-COVERED{color:var(--keep);font-weight:700}.cov-MISSING{color:var(--danger);font-weight:700}
+.cov-UNKNOWN{color:var(--warn);font-weight:700}.cov-NOT_REQUIRED{color:var(--faint)}
 
 :root{
 color-scheme:dark;
@@ -2927,7 +3737,8 @@ document.querySelectorAll('.source-context').forEach(function(pre){
 """
 
 
-def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
+def to_html(findings: List[Finding], scanned: int, builds: int,
+            coverage: Optional[Sequence[CoverageEntry]] = None) -> str:
     esc = html_mod.escape
     counts = summary_counts(findings)
     sev_key = {"CRITICAL": "critical", "HIGH": "high", "MEDIUM": "medium", "LOW": "low", "INFO": "info"}
@@ -2980,6 +3791,28 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
                         " title='Informational findings (e.g. hardened confirmations) are excluded by "
                         "the default --min-severity LOW. Re-run with --min-severity INFO to include them.'")
                  + "</div>")
+
+    if coverage is not None:
+        parts.append("<section class='coverage-wrap'><h2>Security control coverage</h2>")
+        if not coverage:
+            parts.append("<p>No supported HTTP, listener, or scheduled entry points were found.</p>")
+        else:
+            parts.append("<table class='coverage-table'><thead><tr><th>Entry point</th>"
+                         + "".join(f"<th>{esc(label)}</th>" for _, label in _COVERAGE_COLUMNS)
+                         + "</tr></thead><tbody>")
+            for entry in coverage:
+                parts.append(f"<tr><td><code>{esc(entry.entrypoint)}</code><br>"
+                             f"<span class='dim'>{esc(entry.file)}:{entry.line}</span></td>")
+                for key, _ in _COVERAGE_COLUMNS:
+                    status = entry.controls.get(key, "UNKNOWN")
+                    parts.append(f"<td class='cov-{esc(status)}'>{esc(_COVERAGE_MARK.get(status, status))}</td>")
+                parts.append("</tr>")
+            parts.append("</tbody></table>")
+            totals = coverage_summary(coverage)
+            parts.append("<p class='dim'>" + " &middot; ".join(
+                f"{esc(status)}: {totals.get(status, 0)}"
+                for status in ("COVERED", "MISSING", "UNKNOWN", "NOT_REQUIRED")) + "</p>")
+        parts.append("</section>")
 
     if findings:
         categories = sorted({categorize_rule(f.rule_id) for f in findings})
@@ -3093,7 +3926,8 @@ def to_html(findings: List[Finding], scanned: int, builds: int) -> str:
     return "\n".join(parts)
 
 
-def to_markdown(findings: List[Finding], scanned: int, builds: int) -> str:
+def to_markdown(findings: List[Finding], scanned: int, builds: int,
+                coverage: Optional[Sequence[CoverageEntry]] = None) -> str:
     out = ["# JSpringGuard Report", "",
            f"- Version: {VERSION}",
            f"- Author: [{AUTHOR}]({AUTHOR_URL}) &middot; [{REPO_URL}]({REPO_URL})",
@@ -3107,6 +3941,24 @@ def to_markdown(findings: List[Finding], scanned: int, builds: int) -> str:
             if k in counts:
                 out.append(f"| {k} | {counts[k]} |")
         out.append("")
+    if coverage is not None:
+        out += ["## Security control coverage", ""]
+        if not coverage:
+            out += ["No supported HTTP, listener, or scheduled entry points were found.", ""]
+        else:
+            out.append("| Entry point | " + " | ".join(label for _, label in _COVERAGE_COLUMNS) + " |")
+            out.append("|---|" + "---|" * len(_COVERAGE_COLUMNS))
+            for entry in coverage:
+                values = [_COVERAGE_MARK.get(entry.controls.get(key, "UNKNOWN"), "UNKNOWN")
+                          for key, _ in _COVERAGE_COLUMNS]
+                out.append("| `" + entry.entrypoint.replace("|", "\\|") + "` | "
+                           + " | ".join(values) + " |")
+            out.append("")
+            totals = coverage_summary(coverage)
+            out.append("Coverage summary: " + "; ".join(
+                f"{status}: {totals.get(status, 0)}"
+                for status in ("COVERED", "MISSING", "UNKNOWN", "NOT_REQUIRED")))
+            out.append("")
     if not findings:
         out.append("No findings at the selected filters.")
         out.append("")
@@ -3333,6 +4185,11 @@ management.endpoint.shutdown.enabled=true
 spring.security.debug=true
 jwt.secret=mysecret
 spring.datasource.password=admin123
+server.ssl.client-auth=want
+server.ssl.key-store-password=changeit
+server.ssl.trust-store-password=trustme
+spring.security.oauth2.client.provider.alpha.issuer-uri=https://alpha.example
+spring.security.oauth2.client.provider.beta.issuer-uri=https://beta.example
 ''',
     "SecurityConfigGood.java": '''
 package app;
@@ -3416,6 +4273,669 @@ public class ShortHardcodedSecret {
     private static final String SECRET = "123456";   // SpringSecurityCheck-HARDCODED-SECRET (short value)
 }
 ''',
+    "JwtBadConfig.java": '''
+package demo;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
+
+// JWT-NO-EXPIRY: signed without .expiration()
+// JWT-NO-AUDIENCE: no .audience() set
+// JWT-BLANK-SECRET: empty secret
+// HARDEN-JWT-STRONG-ALG: NOT present (HS256 implicit)
+public class JwtBadConfig {
+    public String buildToken(String userId) {
+        return Jwts.builder()
+                .subject(userId)
+                .signWith(io.jsonwebtoken.security.Keys.hmacShaKeyFor("".getBytes()))
+                .compact();
+    }
+
+    // JWT-JWKS-HTTP: plain HTTP JWK URI
+    public io.jsonwebtoken.JwtParser buildParserBad() {
+        return Jwts.parserBuilder()
+                .setSigningKey(io.jsonwebtoken.Jwts.SIG.RS256.keyPair().build().getPublic())
+                .build();
+    }
+
+    public static final String JWKS = "http://auth.example.com/.well-known/jwks.json";  // JWT-JWKS-HTTP
+    public void loadJwks() throws Exception {
+        org.springframework.security.oauth2.jwt.NimbusJwtDecoder
+            .withJwkSetUri("http://auth.example.com/.well-known/jwks.json").build();
+    }
+}
+''',
+    "JwtGoodConfig.java": '''
+package demo;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
+import org.springframework.beans.factory.annotation.Value;
+import java.util.Date;
+
+// HARDEN-JWT-STRONG-ALG + HARDEN-JWT-EXPIRY-SET + HARDEN-JWT-ISSUER-VALIDATION
+// HARDEN-JWT-SECRET-FROM-ENV
+public class JwtGoodConfig {
+    @Value("${app.jwt.secret}")
+    private String jwtSecret;
+
+    public String buildToken(String userId) {
+        long now = System.currentTimeMillis();
+        return Jwts.builder()
+                .subject(userId)
+                .issuer("https://auth.example.com")
+                .audience().add("my-api").and()
+                .expiration(new Date(now + 900_000L))
+                .signWith(SignatureAlgorithm.RS256,
+                          java.security.KeyFactory.getInstance("RSA"))
+                .compact();
+    }
+
+    public io.jsonwebtoken.JwtParser buildParser() {
+        return Jwts.parserBuilder()
+                .requireIssuer("https://auth.example.com")
+                .setSigningKey(getPublicKey())
+                .build();
+    }
+    private java.security.PublicKey getPublicKey() { return null; }
+}
+''',
+    "Oauth2BadConfig.java": '''
+package demo;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+
+// OAUTH2-TOKEN-LOGGING: Bearer token in logger
+// OAUTH2-INTROSPECTION-HTTP: plain HTTP introspection endpoint
+// OAUTH2-SCOPE-HARDCODED: scope baked into source
+public class Oauth2BadConfig {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(Oauth2BadConfig.class);
+
+    public void logToken(String accessToken) {
+        log.debug("Received accessToken: " + accessToken);   // OAUTH2-TOKEN-LOGGING
+    }
+
+    public void setupIntrospection() {
+        String introspectionUri = "http://auth.example.com/oauth/introspect";  // OAUTH2-INTROSPECTION-HTTP
+    }
+
+    public void setupScopes() {
+        registration.scopes("openid", "profile");  // OAUTH2-SCOPE-HARDCODED
+    }
+    private Object registration;
+}
+''',
+    "JwtHeaderUrlBad.java": '''
+package demo;
+import java.net.URL;
+import com.nimbusds.jose.jwk.JWKSet;
+
+public class JwtHeaderUrlBad {
+    public java.io.File loadKid(org.springframework.security.oauth2.jwt.Jwt jwt) {
+        String kid = jwt.getHeader("kid");
+        return new java.io.File(kid); // JWT-KID-INJECTION
+    }
+
+    public JWKSet loadJku(org.springframework.security.oauth2.jwt.Jwt jwt) throws Exception {
+        String jku = jwt.getHeaders().get("jku").toString();
+        return JWKSet.load(new URL(jku)); // JWT-JKU-INJECTION
+    }
+
+    public java.io.InputStream loadX5u(com.nimbusds.jwt.SignedJWT token) throws Exception {
+        String x5u = token.getHeader().getX509CertURL().toString();
+        URL certificateUrl = new URL(x5u); // JWT-X5U-INJECTION
+        return certificateUrl.openStream();
+    }
+}
+''',
+    "PkcePlainBad.java": '''
+package demo;
+public class PkcePlainBad {
+    public void configure() {
+        request.codeChallengeMethod("plain"); // OAUTH2-PKCE-PLAIN
+    }
+    private Object request;
+}
+''',
+    "CookieJwtAuth.java": '''
+package demo;
+import org.springframework.web.bind.annotation.CookieValue;
+public class CookieJwtAuth {
+    public String authenticate(@CookieValue("access_token") String token) {
+        return token;
+    }
+}
+''',
+    "IdorDataflow.java": '''
+package demo;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+public class IdorDataflow {
+    @GetMapping("/orders/{id}")
+    public Object order(@PathVariable Long id) {
+        Long lookupId = id;
+        return orderRepository.findById(lookupId).orElseThrow(); // AUTHZ-IDOR-DATAFLOW
+    }
+    private Object orderRepository;
+}
+''',
+    "IdorAuthorized.java": '''
+package demo;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+public class IdorAuthorized {
+    @PreAuthorize("hasPermission(#id, 'Order', 'read')")
+    @GetMapping("/orders/{id}")
+    public Object order(@PathVariable Long id) {
+        return orderRepository.findById(id).orElseThrow();
+    }
+    private Object orderRepository;
+}
+''',
+    "JwtEmbeddedKeyBad.java": '''
+package demo;
+public class JwtEmbeddedKeyBad {
+    public Object trustJwk(org.springframework.security.oauth2.jwt.Jwt jwt) throws Exception {
+        Object embeddedJwk = jwt.getHeaders().get("jwk");
+        return com.nimbusds.jose.jwk.JWK.parse(embeddedJwk.toString()).toRSAKey().toPublicKey();
+    }
+    public Object trustX5c(com.nimbusds.jwt.SignedJWT token) throws Exception {
+        Object embeddedChain = token.getHeader().get("x5c");
+        return com.nimbusds.jose.util.X509CertChainUtils.parse(embeddedChain.toString()).get(0);
+    }
+}
+''',
+    "JwtEmbeddedKeyGood.java": '''
+package demo;
+public class JwtEmbeddedKeyGood {
+    public Object fixedKey() throws Exception {
+        return com.nimbusds.jose.jwk.JWK.parse(TRUSTED_SERVER_CONFIG).toRSAKey().toPublicKey();
+    }
+    public Object validatedChain(com.nimbusds.jwt.SignedJWT token) throws Exception {
+        Object chain = token.getHeader().get("x5c");
+        java.security.cert.CertPathValidator.getInstance("PKIX");
+        return com.nimbusds.jose.util.X509CertChainUtils.parse(chain.toString()).get(0);
+    }
+    private static final String TRUSTED_SERVER_CONFIG = "configured-key";
+}
+''',
+    "AuthzMatcherOrderBad.java": '''
+package demo;
+public class AuthzMatcherOrderBad {
+    public void configure(Object auth) {
+        auth.requestMatchers("/**").permitAll()
+            .requestMatchers("/admin/**").hasRole("ADMIN");
+    }
+}
+''',
+    "AuthzMatcherOrderGood.java": '''
+package demo;
+public class AuthzMatcherOrderGood {
+    public void configure(Object auth) {
+        auth.requestMatchers("/admin/**").hasRole("ADMIN")
+            .requestMatchers("/public/**").permitAll()
+            .anyRequest().authenticated();
+    }
+}
+''',
+    "OauthTokenSemanticsBad.java": '''
+package demo;
+public class OauthTokenSemanticsBad {
+    public boolean redirectAllowed(String redirectUri, String registeredRedirect) {
+        return redirectUri.startsWith(registeredRedirect);
+    }
+    public void buildUrl(Object builder, String accessToken, String clientSecret) {
+        builder.queryParam("access_token", accessToken);
+        builder.queryParam("client_secret", clientSecret);
+    }
+    public void forwardIdToken(Object oidcUser, Object headers) {
+        String idToken = oidcUser.getIdToken().getTokenValue();
+        headers.setBearerAuth(idToken);
+    }
+    public boolean validateAudience(org.springframework.security.oauth2.core.oidc.OidcIdToken idToken,
+                                    String clientId) {
+        return idToken.getAudience().contains(clientId);
+    }
+    public Object authenticate(String rawToken, Object decoder) {
+        Object jwt = decoder.decode(rawToken);
+        return new JwtAuthenticationToken(jwt);
+    }
+}
+''',
+    "OauthTokenSemanticsGood.java": '''
+package demo;
+public class OauthTokenSemanticsGood {
+    public boolean redirectAllowed(String redirectUri, java.util.Set<String> registered) {
+        return registered.contains(java.net.URI.create(redirectUri).normalize().toString());
+    }
+    public void forwardAccessToken(String accessToken, Object headers) {
+        headers.setBearerAuth(accessToken);
+    }
+    public boolean validateAudience(org.springframework.security.oauth2.core.oidc.OidcIdToken idToken,
+                                    String clientId) {
+        return idToken.getAudience().contains(clientId)
+            && clientId.equals(idToken.getClaimAsString("azp"));
+    }
+    public Object authenticate(String rawToken, Object decoder) {
+        Object jwt = decoder.decode(rawToken);
+        if (!"access".equals(jwt.getClaimAsString("token_use"))) throw new RuntimeException();
+        return new JwtAuthenticationToken(jwt);
+    }
+}
+''',
+    "RefreshLifecycleBad.java": '''
+package demo;
+public class RefreshLifecycleBad {
+    public String refresh(String refreshToken) {
+        return generateAccessToken(refreshToken);
+    }
+    public void logout() {
+        org.springframework.security.core.context.SecurityContextHolder.clearContext();
+    }
+    private String generateAccessToken(String value) { return value; }
+}
+''',
+    "RefreshRotationGood.java": '''
+package demo;
+public class RefreshRotationGood {
+    public String refresh(String refreshToken) {
+        String replacement = generateRefreshToken();
+        refreshTokenRepository.save(replacement);
+        return generateAccessToken(refreshToken);
+    }
+    private String generateRefreshToken() { return "new"; }
+    private String generateAccessToken(String value) { return value; }
+    private Object refreshTokenRepository;
+}
+''',
+    "TlsBadConfig.java": '''
+package demo;
+public class TlsBadConfig {
+    String keyStorePassword = "changeit";
+    String trustStorePassword = "trustme";
+    public void configure(javax.net.ssl.SSLEngine engine,
+                          java.security.cert.PKIXParameters params) throws Exception {
+        javax.net.ssl.SSLContext.getInstance("TLSv1.1");
+        engine.setEnabledCipherSuites(new String[]{"TLS_RSA_WITH_3DES_EDE_CBC_SHA"});
+        Object trust = new org.apache.http.conn.ssl.TrustSelfSignedStrategy();
+        params.setRevocationEnabled(false);
+        engine.setWantClientAuth(true);
+    }
+}
+''',
+    "TlsGoodConfig.java": '''
+package demo;
+public class TlsGoodConfig {
+    String keyStorePassword = System.getenv("TLS_KEYSTORE_PASSWORD");
+    String trustStorePassword = System.getenv("TLS_TRUSTSTORE_PASSWORD");
+    public void configure(javax.net.ssl.SSLEngine engine,
+                          java.security.cert.PKIXParameters params) throws Exception {
+        javax.net.ssl.SSLContext.getInstance("TLSv1.3");
+        engine.setEnabledCipherSuites(new String[]{"TLS_AES_256_GCM_SHA384"});
+        params.setRevocationEnabled(true);
+        engine.setNeedClientAuth(true);
+    }
+}
+''',
+    "FilterChainsBad.java": '''
+package demo;
+public class FilterChainsBad {
+    @Bean @Order(1)
+    public SecurityFilterChain fallback(HttpSecurity http) throws Exception {
+        return http.authorizeHttpRequests(a -> a.anyRequest().permitAll()).build();
+    }
+    @Bean @Order(2)
+    public SecurityFilterChain api(HttpSecurity http) throws Exception {
+        return http.securityMatcher("/api/**")
+            .authorizeHttpRequests(a -> a.anyRequest().authenticated()).build();
+    }
+}
+''',
+    "FilterChainsNoFallback.java": '''
+package demo;
+public class FilterChainsNoFallback {
+    @Bean @Order(1)
+    public SecurityFilterChain api(HttpSecurity http) throws Exception {
+        return http.securityMatcher("/api/**").build();
+    }
+    @Bean @Order(2)
+    public SecurityFilterChain admin(HttpSecurity http) throws Exception {
+        return http.securityMatcher("/admin/**").build();
+    }
+}
+''',
+    "FilterChainsGood.java": '''
+package demo;
+public class FilterChainsGood {
+    @Bean @Order(1)
+    public SecurityFilterChain api(HttpSecurity http) throws Exception {
+        return http.securityMatcher("/api/**").build();
+    }
+    @Bean @Order(99)
+    public SecurityFilterChain fallback(HttpSecurity http) throws Exception {
+        return http.authorizeHttpRequests(a -> a.anyRequest().authenticated()).build();
+    }
+}
+''',
+    "TenantController.java": '''
+package demo;
+public class TenantController {
+    public Object order(@PathVariable String tenantId, @PathVariable Long id) {
+        return tenantService.load(tenantId, id);
+    }
+    private Object tenantService;
+}
+''',
+    "TenantService.java": '''
+package demo;
+public class TenantService {
+    public Object load(String scope, Long id) {
+        return orderRepository.findById(id).orElseThrow();
+    }
+    private Object orderRepository;
+}
+''',
+    "TenantFlowGood.java": '''
+package demo;
+public class TenantFlowGood {
+    public Object order(@PathVariable String tenantId, @PathVariable Long id) {
+        String currentTenant = tenantFromAuthentication();
+        return orderRepository.findByIdAndTenantId(id, currentTenant).orElseThrow();
+    }
+    private String tenantFromAuthentication() { return "trusted"; }
+    private Object orderRepository;
+}
+''',
+    "CoverageSecurityConfig.java": '''
+package demo;
+public class CoverageSecurityConfig {
+    public SecurityFilterChain coverage(HttpSecurity http) throws Exception {
+        return http.authorizeHttpRequests(auth -> auth
+            .requestMatchers("/coverage-open/**").permitAll()
+            .requestMatchers("/coverage-secure/**").hasRole("USER")
+            .anyRequest().authenticated()).build();
+    }
+}
+''',
+    "CoverageBadController.java": '''
+package demo;
+public class CoverageBadController {
+    @PostMapping("/coverage-open/orders/{tenantId}/{id}")
+    public Object update(@PathVariable String tenantId, @PathVariable Long id,
+                         @RequestBody OrderUpdate input) {
+        return coverageOrderService.update(tenantId, id, input);
+    }
+    @PostMapping("/coverage-open/login")
+    public Object login(@RequestBody LoginRequest input) {
+        return authenticationManager.authenticate(input);
+    }
+    private Object coverageOrderService;
+    private Object authenticationManager;
+}
+''',
+    "CoverageGoodController.java": '''
+package demo;
+public class CoverageGoodController {
+    @PreAuthorize("hasAuthority('orders:write')")
+    @PostMapping("/coverage-secure/orders/{tenantId}/{id}")
+    public Object update(@PathVariable String tenantId, @PathVariable Long id,
+                         @Valid @RequestBody OrderUpdate input) {
+        String currentTenant = tenantFromAuthentication();
+        auditService.recordAudit(id, currentTenant);
+        return coverageOrderService.update(currentTenant, id, input);
+    }
+    private String tenantFromAuthentication() { return "trusted"; }
+    private Object coverageOrderService;
+    private Object auditService;
+}
+''',
+    "CoverageOrderService.java": '''
+package demo;
+public class CoverageOrderService {
+    public Object update(String tenantId, Long id, OrderUpdate input) {
+        Object order = orderRepository.findById(id).orElseThrow();
+        return orderRepository.save(order);
+    }
+    private Object orderRepository;
+}
+''',
+    "CoverageEntryPoints.java": '''
+package demo;
+@RestController
+@RequestMapping("/coverage-secure/catalog")
+public class CoverageEntryPoints {
+    @PreAuthorize("hasAuthority('catalog:read')")
+    @GetMapping("/items")
+    public Object items() {
+        return catalogRepository.findAll();
+    }
+    @PreAuthorize("hasAuthority('orders:consume')")
+    @KafkaListener(topics = "orders")
+    public void consume(@Valid OrderEvent event) {
+        auditService.recordAudit(event);
+        orderRepository.save(event);
+    }
+    @Scheduled(cron = "0 0 * * * *")
+    public void cleanup() {
+        auditService.recordAudit("cleanup");
+        orderRepository.deleteExpired();
+    }
+    private Object catalogRepository;
+    private Object orderRepository;
+    private Object auditService;
+}
+''',
+    "AdvancedJwtBad.java": '''
+package demo;
+public class AdvancedJwtBad {
+    private Object sharedKey;
+    public Object readNested(String raw, Object decrypter) throws Exception {
+        EncryptedJWT token = EncryptedJWT.parse(raw);
+        token.decrypt(decrypter);
+        return token.getJWTClaimsSet();
+    }
+    public Object resolveKey(SignedJWT token) {
+        SigningKeyResolver resolver = null;
+        String kid = token.getHeader().getKeyID();
+        return keys.get(kid);
+    }
+    public String generateAccessToken() { return Jwts.builder().signWith(sharedKey).compact(); }
+    public String generateRefreshToken() { return Jwts.builder().signWith(sharedKey).compact(); }
+    public void compressed(Object header) {
+        header.setCompressionAlgorithm(CompressionAlgorithmIdentifiers.DEF);
+    }
+    private java.util.Map<String,Object> keys;
+}
+''',
+    "AdvancedJwtGood.java": '''
+package demo;
+public class AdvancedJwtGood {
+    private Object accessKey, refreshKey;
+    public Object readNested(String raw, Object decrypter, Object trustedVerifier) throws Exception {
+        EncryptedJWT token = EncryptedJWT.parse(raw);
+        token.decrypt(decrypter);
+        SignedJWT inner = token.getPayload().toSignedJWT();
+        if (!inner.verify(trustedVerifier)) throw new RuntimeException();
+        return inner.getJWTClaimsSet();
+    }
+    public String generateAccessToken() { return Jwts.builder().signWith(accessKey).compact(); }
+    public String generateRefreshToken() { return Jwts.builder().signWith(refreshKey).compact(); }
+}
+''',
+    "OauthMixupBad.java": '''
+package demo;
+public class OauthMixupBad {
+    @GetMapping("/oauth/callback")
+    public Object callback(String code) {
+        return exchangeAuthorizationCode(code);
+    }
+}
+''',
+    "DpopBad.java": '''
+package demo;
+public class DpopBad {
+    public boolean validateDPoP(String accessToken, Object proof, Object response) {
+        java.time.Duration maxAge = java.time.Duration.ofMinutes(10);
+        response.setHeader("DPoP-Nonce", createNonce());
+        return proof.verify();
+    }
+}
+''',
+    "DpopGood.java": '''
+package demo;
+public class DpopGood {
+    public boolean validateDPoP(String accessToken, Object proof, Object request, String expectedNonce) {
+        String jti = proof.getJWTID();
+        replayCache.putIfAbsent(jti, proof.getIssueTime());
+        proof.getClaim("htm").equals(request.getMethod());
+        proof.getClaim("htu").equals(request.getRequestURL());
+        java.time.Duration maxAge = java.time.Duration.ofMinutes(5);
+        proof.getClaim("ath");
+        return expectedNonce.equals(proof.getClaim("nonce"));
+    }
+    private java.util.Map replayCache;
+}
+''',
+    "Pkcs12Bad.java": '''
+package demo;
+public class Pkcs12Bad {
+    public void load(java.io.InputStream in) throws Exception {
+        java.security.KeyStore store = java.security.KeyStore.getInstance("PKCS12");
+        store.load(in, null);
+    }
+}
+''',
+    "PasswordResetBad.java": '''
+package demo;
+public class PasswordResetBad {
+    public String createResetToken(String email) {
+        String resetToken = Long.toString(System.currentTimeMillis()) + new java.util.Random().nextInt();
+        resetTokenRepository.save(resetToken);
+        return resetToken;
+    }
+    public void resetPassword(String resetToken, String password) {
+        Object token = resetTokenRepository.findByToken(resetToken);
+        user.setPassword(passwordEncoder.encode(password));
+    }
+    private Object resetTokenRepository, user, passwordEncoder;
+}
+''',
+    "PasswordResetGood.java": '''
+package demo;
+public class PasswordResetGood {
+    public String createResetToken() {
+        byte[] value = new byte[32];
+        new java.security.SecureRandom().nextBytes(value);
+        java.time.Instant expiresAt = java.time.Instant.now().plus(java.time.Duration.ofMinutes(15));
+        return resetTokens.save(value, expiresAt);
+    }
+    public void resetPassword(String resetToken, String password) {
+        Object token = resetTokens.findByToken(resetToken);
+        resetTokens.markUsed(token);
+        user.setPassword(passwordEncoder.encode(password));
+    }
+}
+''',
+    "AuthResilienceBad.java": '''
+package demo;
+public class AuthResilienceBad {
+    @PostMapping("/login")
+    public Object login(String username, String password) {
+        return authenticationManager.authenticate(username, password);
+    }
+    public boolean verifyMFA(String otp) {
+        try { return mfaService.verify(otp); }
+        catch (Exception unavailable) { return true; }
+    }
+}
+''',
+    "AuthResilienceGood.java": '''
+package demo;
+public class AuthResilienceGood {
+    @PostMapping("/login")
+    public Object login(String username, String password) {
+        rateLimiter.acquire(username);
+        return authenticationManager.authenticate(username, password);
+    }
+    public boolean verifyMFA(String otp) {
+        try { return mfaService.verify(otp); }
+        catch (Exception unavailable) { return false; }
+    }
+}
+''',
+    "test-private.key": '''-----BEGIN PRIVATE KEY-----
+TEST-ONLY-NOT-A-REAL-KEY
+-----END PRIVATE KEY-----
+''',
+    "Oauth2GoodConfig.java": '''
+package demo;
+import org.springframework.security.oauth2.client.endpoint.OAuth2AuthorizationCodeGrantRequest;
+
+// HARDEN-OAUTH2-PKCE-ENABLED + HARDEN-OAUTH2-STATE-PARAM
+// HARDEN-JWT-AUDIENCE-VALIDATION + HARDEN-JWT-CLOCK-SKEW
+public class Oauth2GoodConfig {
+    public void configureValidator() {
+        // audience check
+        new org.springframework.security.oauth2.jwt.JwtClaimValidator<java.util.List<String>>("aud", a -> a.contains("my-api"));
+        // bounded clock skew
+        new org.springframework.security.oauth2.jwt.JwtTimestampValidator(java.time.Duration.ofMinutes(2));
+        // PKCE
+        boolean requireProofKey = registration.requireProofKey(true);
+        // state
+        request.state(java.util.UUID.randomUUID().toString());
+    }
+    private Object registration, request;
+}
+''',
+    "CryptoVulnConfig.java": '''
+package demo;
+import javax.crypto.Cipher;
+import java.security.SecureRandom;
+
+// SRC-CRYPTO-RSA-NO-OAEP + SRC-CRYPTO-STATIC-IV + SRC-RANDOM-PREDICTABLE-SEED
+public class CryptoVulnConfig {
+    public void badRsa() throws Exception {
+        Cipher c = Cipher.getInstance("RSA/ECB/PKCS1Padding");  // SRC-CRYPTO-RSA-NO-OAEP
+    }
+    public void badIv() throws Exception {
+        javax.crypto.spec.GCMParameterSpec spec =
+            new javax.crypto.spec.GCMParameterSpec(128, new byte[12]);  // SRC-CRYPTO-STATIC-IV
+    }
+    public void badSeed() {
+        SecureRandom rng = new SecureRandom(new byte[]{1,2,3,4});  // SRC-RANDOM-PREDICTABLE-SEED
+    }
+}
+''',
+    "CryptoGoodConfig.java": '''
+package demo;
+import javax.crypto.Cipher;
+import java.security.SecureRandom;
+
+// HARDEN-RSA-OAEP + HARDEN-CRYPTO-GCM-RANDOM-IV
+public class CryptoGoodConfig {
+    public void goodRsa() throws Exception {
+        Cipher c = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");  // HARDEN-RSA-OAEP
+    }
+    public void goodIv() throws Exception {
+        byte[] iv = new byte[12];
+        new SecureRandom().nextBytes(iv);  // HARDEN-CRYPTO-GCM-RANDOM-IV
+        new javax.crypto.spec.GCMParameterSpec(128, iv);
+    }
+}
+''',
+    "SpringSecBadMisc.java": '''
+package demo;
+import org.springframework.security.web.util.matcher.RegexRequestMatcher;
+import org.springframework.security.access.prepost.PreAuthorize;
+
+// SpringSecurityCheck-REGEX-NO-DOTALL + SRC-SSTI-VIEW-NAME
+public class SpringSecBadMisc {
+    public org.springframework.security.web.util.matcher.RegexRequestMatcher buildMatcher() {
+        return new RegexRequestMatcher("/admin/.*", null);  // SpringSecurityCheck-REGEX-NO-DOTALL
+    }
+    public String handleView(String viewName) {
+        return "redirect:" + viewName;  // SRC-SSTI-VIEW-NAME
+    }
+}
+''',
 }
 
 
@@ -3425,8 +4945,10 @@ def run_selftest() -> int:
         with open(os.path.join(tmp, name), "w", encoding="utf-8") as fh:
             fh.write(content)
 
+    coverage: List[CoverageEntry] = []
     findings = scan(tmp, exts=DEFAULT_EXTS, exclude=set(DEFAULT_EXCLUDE_DIRS),
-                    skip_tests=False, show_hardened=True, jobs=2, with_deps=True)[0]
+                    skip_tests=False, show_hardened=True, jobs=2, with_deps=True,
+                    coverage_out=coverage)[0]
 
     by_key: Dict[str, Finding] = {}
     for f in findings:
@@ -3439,6 +4961,11 @@ def run_selftest() -> int:
         return any(os.path.basename(f.file) == fname and f.rule_id == rid for f in findings)
     def rule_status(fname: str, rid: str) -> List[str]:
         return [f.status for f in findings if os.path.basename(f.file) == fname and f.rule_id == rid]
+    def coverage_entry(entrypoint: str) -> Optional[CoverageEntry]:
+        return next((entry for entry in coverage if entry.entrypoint == entrypoint), None)
+    def coverage_status(entrypoint: str, control: str) -> str:
+        entry = coverage_entry(entrypoint)
+        return entry.controls.get(control, "") if entry else ""
 
     checks: List[Tuple[str, bool]] = [
         # XXE
@@ -3488,6 +5015,211 @@ def run_selftest() -> int:
         # #2: short hardcoded secrets (e.g. "123456") are no longer missed
         ("SpringSecurityCheck-HARDCODED-SECRET detected for a short value",
          has_rule("ShortHardcodedSecret.java", "SpringSecurityCheck-HARDCODED-SECRET")),
+        # JWT rules
+        ("JWT-NO-EXPIRY detected on JwtBadConfig",
+         has_rule("JwtBadConfig.java", "JWT-NO-EXPIRY")),
+        ("JWT-BLANK-SECRET detected on JwtBadConfig",
+         has_rule("JwtBadConfig.java", "JWT-BLANK-SECRET")),
+        ("JWT-JWKS-HTTP detected on JwtBadConfig",
+         has_rule("JwtBadConfig.java", "JWT-JWKS-HTTP")),
+        ("HARDEN-JWT-EXPIRY-SET fires on JwtGoodConfig",
+         has_rule("JwtGoodConfig.java", "HARDEN-JWT-EXPIRY-SET")),
+        ("HARDEN-JWT-ISSUER-VALIDATION fires on JwtGoodConfig",
+         has_rule("JwtGoodConfig.java", "HARDEN-JWT-ISSUER-VALIDATION")),
+        ("HARDEN-JWT-SECRET-FROM-ENV fires on JwtGoodConfig",
+         has_rule("JwtGoodConfig.java", "HARDEN-JWT-SECRET-FROM-ENV")),
+        # OAuth2 rules
+        ("OAUTH2-TOKEN-LOGGING detected on Oauth2BadConfig",
+         has_rule("Oauth2BadConfig.java", "OAUTH2-TOKEN-LOGGING")),
+        ("OAUTH2-INTROSPECTION-HTTP detected on Oauth2BadConfig",
+         has_rule("Oauth2BadConfig.java", "OAUTH2-INTROSPECTION-HTTP")),
+        ("OAUTH2-SCOPE-HARDCODED detected on Oauth2BadConfig",
+         has_rule("Oauth2BadConfig.java", "OAUTH2-SCOPE-HARDCODED")),
+        ("JWT-JKU-INJECTION tracks jku into a remote JWK loader",
+         has_rule("JwtHeaderUrlBad.java", "JWT-JKU-INJECTION")),
+        ("JWT-X5U-INJECTION tracks x5u into a certificate URL",
+         has_rule("JwtHeaderUrlBad.java", "JWT-X5U-INJECTION")),
+        ("JWT-KID-INJECTION produces a valid finding instead of crashing",
+         has_rule("JwtHeaderUrlBad.java", "JWT-KID-INJECTION")),
+        ("OAUTH2-PKCE-PLAIN detected on PkcePlainBad",
+         has_rule("PkcePlainBad.java", "OAUTH2-PKCE-PLAIN")),
+        ("CSRF disabled plus JWT cookie correlation detected",
+         has_rule("SecurityConfigBad.java", "SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE")),
+        ("AUTHZ-IDOR-DATAFLOW tracks PathVariable into repository lookup",
+         has_rule("IdorDataflow.java", "AUTHZ-IDOR-DATAFLOW")),
+        ("AUTHZ-IDOR-DATAFLOW accepts visible @PreAuthorize enforcement",
+         not has_rule("IdorAuthorized.java", "AUTHZ-IDOR-DATAFLOW")),
+        ("OAUTH2-PKCE-PLAIN does not flag the S256/requireProofKey example",
+         not has_rule("Oauth2GoodConfig.java", "OAUTH2-PKCE-PLAIN")),
+        ("JWT-EMBEDDED-JWK-TRUST tracks embedded key material",
+         has_rule("JwtEmbeddedKeyBad.java", "JWT-EMBEDDED-JWK-TRUST")),
+        ("JWT-X5C-TRUST tracks an embedded certificate chain",
+         has_rule("JwtEmbeddedKeyBad.java", "JWT-X5C-TRUST")),
+        ("Embedded-key rules accept configured keys and validated x5c chains",
+         not has_rule("JwtEmbeddedKeyGood.java", "JWT-EMBEDDED-JWK-TRUST")
+         and not has_rule("JwtEmbeddedKeyGood.java", "JWT-X5C-TRUST")),
+        ("AUTHZ-MATCHER-ORDER detects a shadowed admin matcher",
+         has_rule("AuthzMatcherOrderBad.java", "AUTHZ-MATCHER-ORDER")),
+        ("AUTHZ-MATCHER-ORDER accepts specific-before-broad ordering",
+         not has_rule("AuthzMatcherOrderGood.java", "AUTHZ-MATCHER-ORDER")),
+        ("AUTHZ-PREAUTHORIZE-WITHOUT-METHODSECURITY detected",
+         has_rule("IdorAuthorized.java", "AUTHZ-PREAUTHORIZE-WITHOUT-METHODSECURITY")),
+        ("OAUTH2-REDIRECT-PREFIX-MATCH detected",
+         has_rule("OauthTokenSemanticsBad.java", "OAUTH2-REDIRECT-PREFIX-MATCH")),
+        ("OAUTH2-TOKEN-QUERY-PARAM detected",
+         has_rule("OauthTokenSemanticsBad.java", "OAUTH2-TOKEN-QUERY-PARAM")),
+        ("OAUTH2-CLIENT-SECRET-URL detected",
+         has_rule("OauthTokenSemanticsBad.java", "OAUTH2-CLIENT-SECRET-URL")),
+        ("OIDC-IDTOKEN-AS-ACCESS-TOKEN tracks an ID token into Bearer auth",
+         has_rule("OauthTokenSemanticsBad.java", "OIDC-IDTOKEN-AS-ACCESS-TOKEN")),
+        ("OIDC-AZP-NOT-VALIDATED detected on custom audience validation",
+         has_rule("OauthTokenSemanticsBad.java", "OIDC-AZP-NOT-VALIDATED")),
+        ("JWT-TOKEN-TYPE-CONFUSION detected on custom authentication",
+         has_rule("OauthTokenSemanticsBad.java", "JWT-TOKEN-TYPE-CONFUSION")),
+        ("Token-semantic rules accept exact redirects, access tokens, azp and token_use checks",
+         not any(os.path.basename(f.file) == "OauthTokenSemanticsGood.java" and f.rule_id in {
+             "OAUTH2-REDIRECT-PREFIX-MATCH", "OIDC-IDTOKEN-AS-ACCESS-TOKEN",
+             "OIDC-AZP-NOT-VALIDATED", "JWT-TOKEN-TYPE-CONFUSION"} for f in findings)),
+        ("REFRESH-TOKEN-NO-ROTATION detected",
+         has_rule("RefreshLifecycleBad.java", "REFRESH-TOKEN-NO-ROTATION")),
+        ("REFRESH-TOKEN-NO-ROTATION accepts visible rotation",
+         not has_rule("RefreshRotationGood.java", "REFRESH-TOKEN-NO-ROTATION")),
+        ("REFRESH-TOKEN-NO-REVOKE-ON-LOGOUT detected",
+         has_rule("RefreshLifecycleBad.java", "REFRESH-TOKEN-NO-REVOKE-ON-LOGOUT")),
+        ("TLS-OLD-PROTOCOL detected",
+         has_rule("TlsBadConfig.java", "TLS-OLD-PROTOCOL")),
+        ("TLS-WEAK-CIPHER detected",
+         has_rule("TlsBadConfig.java", "TLS-WEAK-CIPHER")),
+        ("TLS-TRUST-SELF-SIGNED detected",
+         has_rule("TlsBadConfig.java", "TLS-TRUST-SELF-SIGNED")),
+        ("TLS-REVOCATION-DISABLED detected",
+         has_rule("TlsBadConfig.java", "TLS-REVOCATION-DISABLED")),
+        ("TLS-MTLS-WANT-INSTEAD-OF-NEED detected",
+         has_rule("TlsBadConfig.java", "TLS-MTLS-WANT-INSTEAD-OF-NEED")),
+        ("TLS-KEYSTORE-PASSWORD-HARDCODED detected",
+         has_rule("TlsBadConfig.java", "TLS-KEYSTORE-PASSWORD-HARDCODED")),
+        ("TLS-TRUSTSTORE-PASSWORD-HARDCODED detected",
+         has_rule("TlsBadConfig.java", "TLS-TRUSTSTORE-PASSWORD-HARDCODED")),
+        ("TLS client-auth property 'want' detected",
+         has_rule("application.properties", "TLS-MTLS-WANT-INSTEAD-OF-NEED")),
+        ("TLS keystore password property detected",
+         has_rule("application.properties", "TLS-KEYSTORE-PASSWORD-HARDCODED")),
+        ("TLS truststore password property detected",
+         has_rule("application.properties", "TLS-TRUSTSTORE-PASSWORD-HARDCODED")),
+        ("Modern TLS configuration has no new TLS antipattern findings",
+         not any(os.path.basename(f.file) == "TlsGoodConfig.java" and f.rule_id in {
+             "TLS-OLD-PROTOCOL", "TLS-WEAK-CIPHER", "TLS-TRUST-SELF-SIGNED",
+             "TLS-REVOCATION-DISABLED", "TLS-MTLS-WANT-INSTEAD-OF-NEED",
+             "TLS-KEYSTORE-PASSWORD-HARDCODED", "TLS-TRUSTSTORE-PASSWORD-HARDCODED"}
+                 for f in findings)),
+        ("AUTHZ-SECURITYFILTERCHAIN-ORDER detects broad earlier chain",
+         has_rule("FilterChainsBad.java", "AUTHZ-SECURITYFILTERCHAIN-ORDER")),
+        ("AUTHZ-FILTERCHAIN-NO-FALLBACK detects scoped-only chains",
+         has_rule("FilterChainsNoFallback.java", "AUTHZ-FILTERCHAIN-NO-FALLBACK")),
+        ("SecurityFilterChain rules accept specific-first plus fallback",
+         not any(os.path.basename(f.file) == "FilterChainsGood.java" and f.rule_id in {
+             "AUTHZ-SECURITYFILTERCHAIN-ORDER", "AUTHZ-FILTERCHAIN-NO-FALLBACK"}
+                 for f in findings)),
+        ("AUTHZ-TENANT-DATAFLOW crosses controller-service boundary",
+         has_rule("TenantService.java", "AUTHZ-TENANT-DATAFLOW")),
+        ("AUTHZ-IDOR-DATAFLOW crosses controller-service boundary",
+         has_rule("TenantService.java", "AUTHZ-IDOR-DATAFLOW")),
+        ("AUTHZ-TENANT-DATAFLOW accepts authenticated tenant binding",
+         not has_rule("TenantFlowGood.java", "AUTHZ-TENANT-DATAFLOW")),
+        ("Coverage matrix inventories insecure and secured endpoints",
+         coverage_entry("POST /coverage-open/orders/{tenantId}/{id}") is not None
+         and coverage_entry("POST /coverage-secure/orders/{tenantId}/{id}") is not None),
+        ("Coverage matrix combines class-level and method-level routes",
+         coverage_entry("GET /coverage-secure/catalog/items") is not None),
+        ("Coverage matrix inventories message consumers and scheduled jobs",
+         coverage_entry("KafkaListener orders") is not None
+         and any(entry.kind == "Scheduled" and entry.method == "cleanup" for entry in coverage)),
+        ("Coverage matrix marks missing controls on insecure path",
+         all(coverage_status("POST /coverage-open/orders/{tenantId}/{id}", key) == "MISSING"
+             for key in ("authentication", "authorization", "tenant", "validation", "audit"))),
+        ("Coverage matrix accepts controls on secured path",
+         all(coverage_status("POST /coverage-secure/orders/{tenantId}/{id}", key) == "COVERED"
+             for key in ("authentication", "authorization", "tenant", "validation", "audit"))),
+        ("Coverage findings retain one finding per missing control",
+         has_rule("CoverageOrderService.java", "AUTHZ-SENSITIVE-SINK-UNCOVERED")
+         and has_rule("CoverageOrderService.java", "TENANT-CONTEXT-LOST")
+         and has_rule("CoverageOrderService.java", "VALIDATION-COVERAGE-GAP")
+         and has_rule("CoverageOrderService.java", "AUDIT-COVERAGE-GAP")),
+        ("Coverage detects mixed authorization callers for shared service",
+         has_rule("CoverageOrderService.java", "AUTHZ-PARTIALLY-PROTECTED-SERVICE")),
+        ("Coverage detects missing login throttling",
+         has_rule("CoverageBadController.java", "RATE-LIMIT-COVERAGE-GAP")),
+        ("OAUTH2-ISSUER-MIXUP detected with multiple configured issuers",
+         has_rule("OauthMixupBad.java", "OAUTH2-ISSUER-MIXUP")),
+        ("JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED detected",
+         has_rule("AdvancedJwtBad.java", "JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED")),
+        ("JWE-ZIP-ENABLED detected",
+         has_rule("AdvancedJwtBad.java", "JWE-ZIP-ENABLED")),
+        ("JWT-KEY-ISSUER-NOT-BOUND detected",
+         has_rule("AdvancedJwtBad.java", "JWT-KEY-ISSUER-NOT-BOUND")),
+        ("JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES detected",
+         has_rule("AdvancedJwtBad.java", "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES")),
+        ("Advanced JWT rules accept verified inner JWS and separated keys",
+         not any(os.path.basename(f.file) == "AdvancedJwtGood.java" and f.rule_id in {
+             "JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED", "JWE-ZIP-ENABLED",
+             "JWT-KEY-ISSUER-NOT-BOUND", "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES"}
+                 for f in findings)),
+        ("CERT-PRIVATE-KEY-COMMITTED scans .key files",
+         has_rule("test-private.key", "CERT-PRIVATE-KEY-COMMITTED")),
+        ("CERT-EMPTY-PKCS12-PASSWORD detected",
+         has_rule("Pkcs12Bad.java", "CERT-EMPTY-PKCS12-PASSWORD")),
+        ("PASSWORD-RESET-NO-EXPIRY detected",
+         has_rule("PasswordResetBad.java", "PASSWORD-RESET-NO-EXPIRY")),
+        ("PASSWORD-RESET-TOKEN-REUSE detected",
+         has_rule("PasswordResetBad.java", "PASSWORD-RESET-TOKEN-REUSE")),
+        ("PASSWORD-RESET-PREDICTABLE-TOKEN detected",
+         has_rule("PasswordResetBad.java", "PASSWORD-RESET-PREDICTABLE-TOKEN")),
+        ("Password reset rules accept random expiring one-time tokens",
+         not any(os.path.basename(f.file) == "PasswordResetGood.java" and f.rule_id.startswith("PASSWORD-RESET-")
+                 for f in findings)),
+        ("AUTH-LOGIN-NO-RATE-LIMIT detected",
+         has_rule("AuthResilienceBad.java", "AUTH-LOGIN-NO-RATE-LIMIT")),
+        ("MFA-FAIL-OPEN detected",
+         has_rule("AuthResilienceBad.java", "MFA-FAIL-OPEN")),
+        ("Auth resilience rules accept throttling and MFA fail-closed",
+         not any(os.path.basename(f.file) == "AuthResilienceGood.java" and f.rule_id in {
+             "AUTH-LOGIN-NO-RATE-LIMIT", "MFA-FAIL-OPEN"} for f in findings)),
+        ("DPOP-JTI-NOT-REPLAY-CHECKED detected",
+         has_rule("DpopBad.java", "DPOP-JTI-NOT-REPLAY-CHECKED")),
+        ("DPOP-HTM-HTU-NOT-VALIDATED detected",
+         has_rule("DpopBad.java", "DPOP-HTM-HTU-NOT-VALIDATED")),
+        ("DPOP-IAT-WINDOW-TOO-LARGE detected",
+         has_rule("DpopBad.java", "DPOP-IAT-WINDOW-TOO-LARGE")),
+        ("DPOP-ATH-NOT-VALIDATED detected",
+         has_rule("DpopBad.java", "DPOP-ATH-NOT-VALIDATED")),
+        ("DPOP-NONCE-NOT-VALIDATED detected",
+         has_rule("DpopBad.java", "DPOP-NONCE-NOT-VALIDATED")),
+        ("DPoP rules accept complete proof validation",
+         not any(os.path.basename(f.file) == "DpopGood.java" and f.rule_id.startswith("DPOP-")
+                 for f in findings)),
+        ("HARDEN-JWT-AUDIENCE-VALIDATION fires on Oauth2GoodConfig",
+         has_rule("Oauth2GoodConfig.java", "HARDEN-JWT-AUDIENCE-VALIDATION")),
+        ("HARDEN-JWT-CLOCK-SKEW fires on Oauth2GoodConfig",
+         has_rule("Oauth2GoodConfig.java", "HARDEN-JWT-CLOCK-SKEW")),
+        ("HARDEN-OAUTH2-PKCE-ENABLED fires on Oauth2GoodConfig",
+         has_rule("Oauth2GoodConfig.java", "HARDEN-OAUTH2-PKCE-ENABLED")),
+        ("HARDEN-OAUTH2-STATE-PARAM fires on Oauth2GoodConfig",
+         has_rule("Oauth2GoodConfig.java", "HARDEN-OAUTH2-STATE-PARAM")),
+        # Crypto + Spring-Misc rules (3.11)
+        ("SRC-CRYPTO-RSA-NO-OAEP detected on CryptoVulnConfig",
+         has_rule("CryptoVulnConfig.java", "SRC-CRYPTO-RSA-NO-OAEP")),
+        ("SRC-CRYPTO-STATIC-IV detected on CryptoVulnConfig",
+         has_rule("CryptoVulnConfig.java", "SRC-CRYPTO-STATIC-IV")),
+        ("SRC-RANDOM-PREDICTABLE-SEED detected on CryptoVulnConfig",
+         has_rule("CryptoVulnConfig.java", "SRC-RANDOM-PREDICTABLE-SEED")),
+        ("HARDEN-RSA-OAEP fires on CryptoGoodConfig",
+         has_rule("CryptoGoodConfig.java", "HARDEN-RSA-OAEP")),
+        ("HARDEN-CRYPTO-GCM-RANDOM-IV fires on CryptoGoodConfig",
+         has_rule("CryptoGoodConfig.java", "HARDEN-CRYPTO-GCM-RANDOM-IV")),
+        ("SpringSecurityCheck-REGEX-NO-DOTALL detected on SpringSecBadMisc",
+         has_rule("SpringSecBadMisc.java", "SpringSecurityCheck-REGEX-NO-DOTALL")),
+        ("SRC-SSTI-VIEW-NAME detected on SpringSecBadMisc",
+         has_rule("SpringSecBadMisc.java", "SRC-SSTI-VIEW-NAME")),
     ]
 
     ok = True
@@ -3564,16 +5296,18 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
          paths: Optional[List[str]] = None, context_radius: int = 3,
          build_inventory: Optional[List[str]] = None,
          module_evidence: Optional[Dict[str, str]] = None,
-         active_rules: Optional[Sequence[Rule]] = None) -> Tuple[List[Finding], int, int]:
+         active_rules: Optional[Sequence[Rule]] = None,
+         coverage_out: Optional[List[CoverageEntry]] = None) -> Tuple[List[Finding], int, int]:
     targets = paths or [root]
     inventory, build_files = walk(targets, tuple(set(exts) | set(PROP_EXTS) |
-        {".html", ".htm", ".properties"}), exclude, skip_tests, True)
+        set(CERT_TEXT_EXTS) | {".html", ".htm", ".properties"}), exclude, skip_tests, True)
     inventory = sorted(set(inventory))
     build_files = sorted(set(build_files))
     if build_inventory is not None:
         build_inventory.extend(build_files)
     src_files = [p for p in inventory if p.endswith(exts) and not p.endswith((".html", ".htm"))]
     template_files = [p for p in inventory if p.endswith((".html", ".htm"))]
+    certificate_text_files = [p for p in inventory if p.endswith(CERT_TEXT_EXTS)]
     props_files = [p for p in inventory if p.endswith(PROP_EXTS) and
         (p in targets or any(k in os.path.basename(p) for k in
          ("application", "security", "bootstrap", "management", "actuator")))]
@@ -3594,6 +5328,8 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
     results.clear()
     helper_index = build_helper_index(loaded)
     findings: List[Finding] = []
+    active_ids = ({rule.rid for rule in active_rules}
+                  if active_rules is not None else {rule.rid for rule in RULES})
     for p, (lines, methods) in loaded.items():
         findings.extend(analyze_file(p, raw_map[p], lines, methods, helper_index, root,
                                      show_hardened, active_rules, context_radius))
@@ -3611,6 +5347,104 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
                 else:
                     extra.extend(analyzer(rel, text, context_radius=context_radius))
             findings.extend(f for f in extra if not finding_suppressed(raw_map[p], f))
+            jose_rule_ids = active_ids & {"JWT-JKU-INJECTION", "JWT-X5U-INJECTION"}
+            if jose_rule_ids:
+                jose_hits = analyze_jose_header_url_injection(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=jose_rule_ids)
+                findings.extend(f for f in jose_hits if not finding_suppressed(raw_map[p], f))
+            embedded_rule_ids = active_ids & {"JWT-EMBEDDED-JWK-TRUST", "JWT-X5C-TRUST"}
+            if embedded_rule_ids:
+                embedded_hits = analyze_embedded_jose_key_trust(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=embedded_rule_ids)
+                findings.extend(f for f in embedded_hits if not finding_suppressed(raw_map[p], f))
+            if "AUTHZ-IDOR-DATAFLOW" in active_ids:
+                idor_hits = analyze_authz_idor_dataflow(
+                    rel, text, context_radius=context_radius, method_bounds=method_bounds)
+                findings.extend(f for f in idor_hits if not finding_suppressed(raw_map[p], f))
+            if "AUTHZ-MATCHER-ORDER" in active_ids:
+                matcher_hits = analyze_authz_matcher_order(rel, text, context_radius=context_radius)
+                findings.extend(f for f in matcher_hits if not finding_suppressed(raw_map[p], f))
+            chain_rule_ids = active_ids & {"AUTHZ-SECURITYFILTERCHAIN-ORDER", "AUTHZ-FILTERCHAIN-NO-FALLBACK"}
+            if chain_rule_ids:
+                chain_hits = analyze_security_filter_chains(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=chain_rule_ids)
+                findings.extend(f for f in chain_hits if not finding_suppressed(raw_map[p], f))
+            if "OIDC-IDTOKEN-AS-ACCESS-TOKEN" in active_ids:
+                id_token_hits = analyze_idtoken_as_access_token(
+                    rel, text, context_radius=context_radius, method_bounds=method_bounds)
+                findings.extend(f for f in id_token_hits if not finding_suppressed(raw_map[p], f))
+            semantic_rule_ids = active_ids & {"OIDC-AZP-NOT-VALIDATED", "JWT-TOKEN-TYPE-CONFUSION"}
+            if semantic_rule_ids:
+                semantic_hits = analyze_token_semantics(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=semantic_rule_ids)
+                findings.extend(f for f in semantic_hits if not finding_suppressed(raw_map[p], f))
+            if "REFRESH-TOKEN-NO-ROTATION" in active_ids:
+                refresh_hits = analyze_refresh_rotation(
+                    rel, text, context_radius=context_radius, method_bounds=method_bounds)
+                findings.extend(f for f in refresh_hits if not finding_suppressed(raw_map[p], f))
+            jwt_advanced_ids = active_ids & {
+                "JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED", "JWT-KEY-ISSUER-NOT-BOUND",
+                "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES"}
+            if jwt_advanced_ids:
+                advanced_hits = analyze_jwt_advanced_semantics(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=jwt_advanced_ids)
+                findings.extend(f for f in advanced_hits if not finding_suppressed(raw_map[p], f))
+            dpop_ids = active_ids & {"DPOP-JTI-NOT-REPLAY-CHECKED", "DPOP-HTM-HTU-NOT-VALIDATED",
+                                     "DPOP-IAT-WINDOW-TOO-LARGE", "DPOP-ATH-NOT-VALIDATED",
+                                     "DPOP-NONCE-NOT-VALIDATED"}
+            if dpop_ids:
+                dpop_hits = analyze_dpop_validation(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=dpop_ids)
+                findings.extend(f for f in dpop_hits if not finding_suppressed(raw_map[p], f))
+            if "CERT-EMPTY-PKCS12-PASSWORD" in active_ids:
+                pkcs12_hits = analyze_pkcs12_empty_password(
+                    rel, text, context_radius=context_radius, method_bounds=method_bounds)
+                findings.extend(f for f in pkcs12_hits if not finding_suppressed(raw_map[p], f))
+            reset_ids = active_ids & {"PASSWORD-RESET-NO-EXPIRY", "PASSWORD-RESET-TOKEN-REUSE",
+                                      "PASSWORD-RESET-PREDICTABLE-TOKEN"}
+            if reset_ids:
+                reset_hits = analyze_password_reset(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=reset_ids)
+                findings.extend(f for f in reset_hits if not finding_suppressed(raw_map[p], f))
+            resilience_ids = active_ids & {"AUTH-LOGIN-NO-RATE-LIMIT", "MFA-FAIL-OPEN"}
+            if resilience_ids:
+                resilience_hits = analyze_auth_resilience(
+                    rel, text, context_radius=context_radius,
+                    method_bounds=method_bounds, enabled=resilience_ids)
+                findings.extend(f for f in resilience_hits if not finding_suppressed(raw_map[p], f))
+            kid_hits = _check_kid_injection(rel, lines, raw_map[p], methods, context_radius)
+            findings.extend(f for f in kid_hits if not finding_suppressed(raw_map[p], f))
+    if "SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE" in active_ids:
+        findings.extend(analyze_csrf_disabled_jwt_cookie(
+            loaded, raw_map, root, build_files, context_radius=context_radius))
+    if "AUTHZ-PREAUTHORIZE-WITHOUT-METHODSECURITY" in active_ids:
+        findings.extend(analyze_preauthorize_without_method_security(
+            loaded, raw_map, root, build_files, context_radius=context_radius))
+    if "REFRESH-TOKEN-NO-REVOKE-ON-LOGOUT" in active_ids:
+        findings.extend(analyze_refresh_logout_revocation(
+            loaded, raw_map, root, build_files, context_radius=context_radius))
+    project_dataflow_ids = active_ids & {
+        "AUTHZ-TENANT-DATAFLOW", "AUTHZ-IDOR-DATAFLOW"}
+    if project_dataflow_ids:
+        findings.extend(analyze_interprocedural_tenant_dataflow(
+            loaded, raw_map, root, context_radius=context_radius,
+            enabled=project_dataflow_ids))
+    if "OAUTH2-ISSUER-MIXUP" in active_ids:
+        findings.extend(analyze_oauth_issuer_mixup(
+            loaded, raw_map, root, props_files, context_radius=context_radius))
+    if coverage_out is not None:
+        coverage_entries, coverage_findings = analyze_security_coverage(
+            loaded, raw_map, root, context_radius=context_radius, enabled=active_ids,
+            build_files=build_files)
+        coverage_out.extend(coverage_entries)
+        findings.extend(coverage_findings)
     for p in template_files:
         try:
             with open(p, encoding="utf-8", errors="replace") as fh:
@@ -3620,6 +5454,9 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
         rel = os.path.relpath(p, root) if root else p
         findings.extend(f for f in analyze_template(rel, "\n".join(raw_map[p]), context_radius=context_radius)
                         if not finding_suppressed(raw_map[p], f))
+    if "CERT-PRIVATE-KEY-COMMITTED" in active_ids:
+        for p in certificate_text_files:
+            findings.extend(analyze_certificate_text_file(p, root, context_radius=context_radius))
     if with_deps:
         # The nearest inventoried POM owns a source file; sibling modules cannot
         # accidentally satisfy a combination's source/security prerequisite.
@@ -3648,7 +5485,7 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
         findings.extend(analyze_props_file(pf, root))
     findings = dedupe_findings(findings)
     enrich_context(findings, root, context_radius, raw_map)
-    return findings, len(src_files) + len(template_files), len(build_files) if with_deps else 0
+    return findings, len(src_files) + len(template_files) + len(certificate_text_files), len(build_files) if with_deps else 0
 
 
 # --------------------------------------------------------------------------
@@ -3751,6 +5588,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--min-severity", default="LOW", choices=SEVERITY_LIST)
     ap.add_argument("--fail-on", default="MEDIUM", choices=SEVERITY_LIST + ["NONE"])
     ap.add_argument("--format", default="text", choices=["text", "json", "sarif", "markdown", "html"])
+    ap.add_argument("--coverage", action="store_true",
+                    help="Add a project-wide security-control coverage matrix and coverage findings")
+    ap.add_argument("--coverage-format", default="table", choices=["table", "json"],
+                    help="Coverage rendering for text reports (default: table; other report formats use their native representation)")
+    ap.add_argument("--fail-on-coverage-gap", action="store_true",
+                    help="Exit with status 1 when the coverage matrix contains a required MISSING control")
     ap.add_argument("--out", help="Output file. If omitted and --format is not "
                     "'text', a filename is generated automatically (e.g. "
                     "security-check-<project>-<timestamp>.html).")
@@ -3862,11 +5705,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     resolver_incomplete = False
     resolved_dependencies: List[ResolvedDependency] = []
     module_evidence: Dict[str, str] = {}
+    coverage_entries: Optional[List[CoverageEntry]] = (
+        [] if args.coverage or args.fail_on_coverage_gap else None)
     findings, n_src, n_build = scan(root, exts, exclude, args.skip_tests, args.show_hardened,
                                     max(1, args.jobs), not args.no_deps, paths=args.paths,
                                     context_radius=args.context, build_inventory=osv_build_files,
                                     module_evidence=module_evidence,
-                                    active_rules=active_rules)
+                                    active_rules=active_rules,
+                                    coverage_out=coverage_entries)
 
     if args.codeql_sarif:
         try:
@@ -4014,15 +5860,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             with open(out_path, "w", encoding="utf-8") as fh:
                 old, sys.stdout = sys.stdout, fh
                 try:
-                    print_text(findings, n_src, n_build, False, args.show_fix)
+                    print_text(findings, n_src, n_build, False, args.show_fix,
+                               coverage_entries if args.coverage else None,
+                               args.coverage_format)
                 finally:
                     sys.stdout = old
         else:
             print_text(findings, n_src, n_build,
-                       not args.no_color and sys.stdout.isatty(), args.show_fix)
+                       not args.no_color and sys.stdout.isatty(), args.show_fix,
+                       coverage_entries if args.coverage else None,
+                       args.coverage_format)
     elif args.format in ("markdown", "html"):
-        text = (to_markdown(findings, n_src, n_build) if args.format == "markdown"
-                else to_html(findings, n_src, n_build))
+        text = (to_markdown(findings, n_src, n_build,
+                            coverage_entries if args.coverage else None)
+                if args.format == "markdown"
+                else to_html(findings, n_src, n_build,
+                             coverage_entries if args.coverage else None))
         with open(out_path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
     else:
@@ -4030,7 +5883,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                    else {"tool": "JSpringGuard", "version": VERSION,
                          "author": AUTHOR, "repository": REPO_URL,
                          "files_scanned": n_src, "build_files_scanned": n_build,
-                         "findings": [asdict(f) for f in findings]})
+                         "findings": [asdict(f) for f in findings],
+                         **({"coverage": coverage_payload(coverage_entries or [])}
+                            if args.coverage else {})})
         text = json.dumps(payload, indent=2, ensure_ascii=False)
         with open(out_path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
@@ -4042,6 +5897,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if osv_incomplete or resolver_incomplete:
         return 2
+    if (args.fail_on_coverage_gap and coverage_entries is not None and
+            any(status == "MISSING" for entry in coverage_entries
+                for status in entry.controls.values())):
+        return 1
     if args.fail_on == "NONE":
         return 0
     limit = SEVERITY_ORDER[args.fail_on]
@@ -4320,7 +6179,342 @@ MERGE_SRC_RULES: List[Rule] = [
          "MEDIUM", [], [], always_report=True, kind="sink",
          note="Verify that client certificates are required, mapped to the intended principal, and backed by a trusted CA.",
          fix="Require client certificates at the TLS layer, use a restricted trust store, and configure an explicit subject principal mapping."),
+
+    # ---- JWT deep checks (jwt_tool attack playbook) -------------------------
+    # These complement the existing SpringSecurityCheck-JWT-* rules and focus on
+    # code-level construction mistakes that jwt_tool would expose at runtime.
+
+    Rule("JWT-NO-EXPIRY", "JWT built without an expiration claim",
+         # Matches .builder() or Jwts.builder() chains that contain .signWith( but
+         # no .expiration( / .setExpiration( anywhere on the same statement chain.
+         re.compile(
+             r"Jwts\s*\.\s*builder\s*\(\s*\)"
+             r"(?:(?!\.(?:expiration|setExpiration)\s*\().){0,800}"
+             r"\.signWith\s*\(",
+             re.I | re.S),
+         "MEDIUM", [], [],
+         "A JWT is signed and issued without setting an expiration (exp) claim. "
+         "Tokens never expire and remain valid indefinitely after theft.",
+         always_report=True, kind="antipattern",
+         fix="Add .expiration(new Date(System.currentTimeMillis() + TOKEN_TTL_MS)) "
+             "before .signWith(). Short-lived tokens (≤15 min) with refresh-token "
+             "rotation are the recommended pattern."),
+
+    Rule("JWT-NO-AUDIENCE", "JWT issued without an audience claim",
+         re.compile(
+             r"Jwts\s*\.\s*builder\s*\(\s*\)"
+             r"(?:(?!\.(?:audience|setAudience|claim\s*\(\s*[\x22\x27]aud[\x22\x27])\s*\().){0,800}"
+             r"\.signWith\s*\(",
+             re.I | re.S),
+         "LOW", [], [],
+         "A JWT is issued without an audience (aud) claim. Without it, a token "
+         "issued for service A can be replayed against service B if both trust the "
+         "same key.",
+         always_report=True, kind="antipattern",
+         fix='Add .audience().add("your-api-id").and() (jjwt 0.12+) or '
+             ".claim(\"aud\", \"your-api-id\") before .signWith()."),
+
+    Rule("JWT-NO-SUBJECT-VALIDATION", "JWT parser does not enforce a subject claim",
+         re.compile(
+             r"Jwts\s*\.\s*(?:parser|parserBuilder)\s*\(\s*\)"
+             r"(?:(?!\.requireSubject\s*\().){0,600}"
+             r"\.(?:setSigningKey|verifyWith|secretKey)\s*\(",
+             re.I | re.S),
+         "LOW", [], [],
+         "The JWT parser does not call .requireSubject(), so a token with a missing "
+         "or empty sub claim is accepted silently. This can mask impersonation.",
+         always_report=True, kind="antipattern",
+         fix="Call .requireSubject(expectedSub) on the parser builder."),
+
+    Rule("JWT-BLANK-SECRET", "JWT signed with an empty or trivially weak secret",
+         # Matches .signWith( with an empty literal, blank-password literal, or
+         # new byte[0] as the key material. The optional prefix group covers both
+         # the short form (Keys.hmacShaKeyFor) and fully-qualified class paths
+         # (io.jsonwebtoken.security.Keys.hmacShaKeyFor) that javac-style imports
+         # emit in the source. .getBytes() after the literal is also allowed.
+         re.compile(
+             r"\.signWith\s*\(\s*"
+             r"(?:[A-Za-z0-9_.]+\s*\.\s*hmacShaKeyFor\s*\(\s*)?"
+             r"(?:"
+             r"[\x22\x27]{2}(?:\.getBytes\s*\(\s*\))?"
+             r"|[\x22\x27]\s{1,10}[\x22\x27]"
+             r"|new\s+byte\s*\[\s*0\s*\]"
+             r"|[\x22\x27](?:secret|password|test|jwt|key|changeme|placeholder)[\x22\x27]"
+             r"(?:\.getBytes\s*\(\s*\))?"
+             r")",
+             re.I),
+         "CRITICAL", [], [],
+         "JWT is signed with an empty or well-known trivial secret. "
+         "Any attacker can forge arbitrary tokens (CVE-2019-20933 / CVE-2020-28637 class).",
+         always_report=True, kind="antipattern",
+         fix="Generate a cryptographically random key: "
+             "Keys.secretKeyFor(SignatureAlgorithm.HS256) or a 256-bit random byte array "
+             "stored in a secrets manager, never in source code."),
+
+    Rule("JWT-NULL-SIGNATURE", "JWT parser accepts tokens with a null or empty signature",
+         re.compile(
+             r"setAllowedAlgorithm[^(]{0,60}(?:NONE|none)|"
+             r"ignoreSignature\s*\(\s*\)|"
+             r"\.parse\s*\([^)]{0,200}\)\s*\.(?:getBody|getPayload)\s*\(\s*\)"
+             r"(?![\s\S]{0,200}\.(?:setSigningKey|verifyWith))",
+             re.I | re.S),
+         "CRITICAL", [], [],
+         "The JWT parser is configured to accept tokens without verifying the signature. "
+         "Token forgery requires no secret at all (CVE-2020-28042 class).",
+         always_report=True, kind="antipattern",
+         fix="Always call .setSigningKey() / .verifyWith() before parsing. "
+             "Use parseClaimsJws() (not parseClaimsJwt()) to enforce a signature."),
+
+    Rule("JWT-WEAK-KEY-SIZE", "JWT/crypto key size below recommended minimum",
+         # RSA < 2048 bit or EC < 256 bit in KeyPairGenerator.initialize()
+         re.compile(
+             r"(?:RSA|EC|DSA)[^;\n]{0,40}"
+             r"KeyPairGenerator\s*\.\s*getInstance\s*\([^;\n]{0,80}"
+             r"\.\s*initialize\s*\(\s*(\d+)"
+             r"|KeyPairGenerator\s*\.\s*getInstance\s*\([^)\n]{0,40}"
+             r"(?:RSA|DSA)[^;\n]{0,80}\.initialize\(\s*(\d+)",
+             re.I),
+         "HIGH", [], [],
+         "RSA/DSA key sizes below 2048 bit (or EC below 256 bit) are considered weak "
+         "and breakable with modern hardware.",
+         always_report=True, kind="antipattern",
+         fix="Use at least RSA-2048 or EC P-256/P-384. "
+             "For new code prefer EC (smaller, faster) or RSA-4096 for long-lived keys."),
+
+    Rule("JWT-JWKS-HTTP", "JWKS endpoint fetched over plain HTTP",
+         re.compile(
+             r"(?:withJwkSetUri|withPublicKey|JWKSet\s*\.\s*load)\s*\(\s*"
+             r"[\x22\x27]http://",
+             re.I),
+         "HIGH", [], [],
+         "The JWK Set is fetched over unencrypted HTTP. An attacker on the network "
+         "can substitute their own public key and then forge valid tokens.",
+         always_report=True, kind="antipattern",
+         fix="Use HTTPS with a valid certificate. "
+             "Pin the JWKS URI and set a short cache TTL."),
+
+    # ---- JWT extended checks (3.10) -----------------------------------------
+
+    Rule("JWT-AUDIENCE-VALIDATION", "JWT parser does not verify the audience claim",
+         # Fires when a Jwts parser/parserBuilder is used but .requireAudience() or
+         # JwtClaimValidator("aud", ...) is absent from the same chain.
+         re.compile(
+             r"Jwts\s*\.\s*(?:parser|parserBuilder)\s*\(\s*\)"
+             r"(?:(?!\.(?:requireAudience|requireAud)\s*\().){0,600}"
+             r"\.(?:setSigningKey|verifyWith|secretKey)\s*\(",
+             re.I | re.S),
+         "MEDIUM", [], [],
+         "JWT parser does not enforce audience (aud) validation. "
+         "A token issued for service A can be replayed at service B if both share the same key.",
+         fix="Call .requireAudience(\"expected-audience\") on the parser builder, "
+             "or use a JwtClaimValidator<List<String>>(\"aud\", aud -> aud.contains(\"my-api\")) "
+             "as part of a DelegatingOAuth2TokenValidator."),
+
+    Rule("JWT-CLOCK-SKEW", "JWT clock skew tolerance set to more than 5 minutes",
+         # JwtTimestampValidator(Duration.ofMinutes(N)) with N > 5, or old-style
+         # setAllowedClockSkewSeconds(N) / allowedClockSkewSeconds(N) > 300.
+         re.compile(
+             r"JwtTimestampValidator\s*\(\s*Duration\s*\.\s*ofMinutes\s*\(\s*([6-9]|\d{2,})\s*\)|"
+             r"JwtTimestampValidator\s*\(\s*Duration\s*\.\s*ofHours\s*\(\s*\d+\s*\)|"
+             r"(?:setAllowedClockSkewSeconds|allowedClockSkewSeconds)\s*\(\s*([3-9]\d{2,}|\d{4,})\s*\)",
+             re.I),
+         "LOW", [], [],
+         "A clock skew tolerance >5 minutes extends the validity window of expired tokens, "
+         "giving attackers more time to replay stolen tokens.",
+         always_report=True, kind="antipattern",
+         fix="Keep clock skew at or below 5 minutes (Duration.ofMinutes(5) / 300 seconds). "
+             "Pair short-lived tokens with refresh-token rotation instead."),
+
+    Rule("JWT-SENSITIVE-CLAIMS", "Sensitive PII or role data embedded directly in JWT payload",
+         # Detects .claim("email"/"phone"/"ssn"/"dob"/"address"/"role"/"roles"/"permissions")
+         # being set on a builder — these fields land in the (base64-only) payload visible
+         # to any token holder without decryption.
+         re.compile(
+             r"\.claim\s*\(\s*[\x22\x27]"
+             r"(?:email|phone|ssn|social.?security|dob|date.?of.?birth|address|"
+             r"role|roles|permission|permissions|authorities|groups|salary|credit)"
+             r"[\x22\x27]",
+             re.I),
+         "LOW", [], [],
+         "Sensitive data (PII, roles, permissions) is stored in the JWT payload. "
+         "JWT payloads are only base64-encoded, not encrypted, so any token holder "
+         "can read this data. Use opaque tokens or JWE if sensitive claims are required.",
+         always_report=True, kind="sink",
+         fix="Store only a stable, non-sensitive subject identifier in the JWT. "
+             "Fetch roles/permissions from the authorisation server at request time, "
+             "or use JWE (JSON Web Encryption) for sensitive payloads."),
+
+    Rule("JWT-REFRESH-TOKEN-REUSE", "Refresh token stored insecurely or reuse not detected",
+         # Flags refresh tokens stored in localStorage (JS interop / Thymeleaf inline),
+         # Cookie without explicit Secure+HttpOnly, or direct DB upsert without a
+         # rotation/revocation column alongside it.
+         re.compile(
+             r"localStorage\s*\.\s*setItem\s*\([^)]{0,60}(?:refresh|token)|"
+             r"refreshToken\s*[=:]\s*(?:request\s*\.\s*getParameter|"
+             r"request\s*\.\s*getHeader|getCookies\s*\(\s*\)[^;]{0,120}\.getValue)"
+             r"[^;]{0,200}(?:\.save\s*\(|repository\s*\.\s*save\s*\()",
+             re.I | re.S),
+         "MEDIUM", [], [],
+         "A refresh token appears to be stored in localStorage (XSS-readable) or "
+         "persisted without a rotation/revocation strategy. Stolen refresh tokens "
+         "allow persistent account takeover.",
+         always_report=True, kind="sink",
+         fix="Store refresh tokens in HttpOnly Secure cookies (not localStorage). "
+             "Implement refresh-token rotation: issue a new refresh token on every use "
+             "and invalidate the old one. Detect and revoke token families on reuse."),
+
+    # ---- Rules from CodeQL/Semgrep gap analysis (3.11) ----------------------
+
+    Rule("JWT-PARSE-NO-VERIFY", "JWT parsed with .parse() instead of .parseClaimsJws()",
+         # CodeQL: java/missing-jwt-signature-check (CWE-347, severity 7.8, precision high)
+         # .setSigningKey()/verifyWith() is set but the chain ends with .parse(...) instead
+         # of .parseClaimsJws(...) / .parseClaimsJwt(...). The parse() method silently
+         # accepts tokens with an empty signature even when a key is configured.
+         re.compile(
+             r"Jwts\s*\.\s*(?:parser|parserBuilder)\s*\(\s*\)"
+             r"(?:(?!\.parseClaimsJw[st]\s*\().){0,600}"
+             r"\.(?:setSigningKey|verifyWith|secretKey)\s*\([^;]{0,200}"
+             r"\.parse\s*\(",
+             re.I | re.S),
+         "CRITICAL", [], [],
+         "JwtParser.parse() accepts tokens with an empty or missing signature even when a "
+         "signing key is set. Use parseClaimsJws() (or parseClaimsJwt() for unsigned tokens "
+         "that you explicitly trust). CWE-347 — CodeQL java/missing-jwt-signature-check.",
+         always_report=True, kind="antipattern",
+         fix="Replace .parse(token) with .parseClaimsJws(token) to enforce signature "
+             "verification. For unsigned tokens that you legitimately need, use "
+             "parseClaimsJwt() and ensure the path is only reachable for trusted issuers."),
+
+    Rule("SRC-CRYPTO-STATIC-IV", "Static or hardcoded IV used for symmetric encryption",
+         # CWE-329: Not using a random IV with CBC/GCM makes ciphertext deterministic.
+         # Detects: new GCMParameterSpec(128, "literal") / new IvParameterSpec("literal")
+         # and byte[] iv = {1,2,3,...} followed by IvParameterSpec(iv) is caught by the
+         # array-literal branch.
+         re.compile(
+             # Drop "new" prefix to match FQN (javax.crypto.spec.GCMParameterSpec)
+             # Also accept byte[] initialiser (new byte[]{...}) via [\d\]] in char class
+             r"GCMParameterSpec\s*\(\s*\d+\s*,\s*(?:"
+             r"[\x22\x27][^\x22\x27]{0,64}[\x22\x27]"
+             r"|new\s+byte\s*\[\s*[\d\]]"
+             r")|"
+             r"IvParameterSpec\s*\(\s*(?:"
+             r"[\x22\x27][^\x22\x27]{0,64}[\x22\x27]"
+             r"|new\s+byte\s*\[\s*[\d\]]"
+             r")",
+             re.I),
+         "HIGH", [], [],
+         "A static or hardcoded IV is used for AES-GCM or AES-CBC encryption. "
+         "Reusing the same IV with the same key leaks the keystream (GCM) or "
+         "allows plaintext recovery (CBC). CWE-329.",
+         always_report=True, kind="antipattern",
+         fix="Generate a fresh random IV for every encryption operation: "
+             "byte[] iv = new byte[12]; new SecureRandom().nextBytes(iv); "
+             "new GCMParameterSpec(128, iv). Prepend the IV to the ciphertext for decryption."),
+
+    Rule("SRC-CRYPTO-RSA-NO-OAEP", "RSA encryption without OAEP padding",
+         # CWE-780: RSA/ECB/PKCS1Padding is vulnerable to Bleichenbacher (PKCS#1 v1.5).
+         # Plain "RSA" defaults to PKCS1Padding on most JCA providers.
+         re.compile(
+             r'Cipher\s*\.\s*getInstance\s*\(\s*[\x22\x27]'
+             r'(?:RSA(?:/ECB/PKCS1Padding)?|RSA/NONE/PKCS1Padding)'
+             r'[\x22\x27]',
+             re.I),
+         "HIGH", [], [],
+         "RSA encryption uses PKCS#1 v1.5 padding (or no explicit padding, which defaults "
+         "to PKCS#1 v1.5). This is vulnerable to the Bleichenbacher padding oracle attack. "
+         "CWE-780.",
+         always_report=True, kind="antipattern",
+         fix='Use OAEP padding: Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding"). '
+             "For key wrapping, use AES-GCM key wrapping instead of raw RSA."),
+
+    Rule("SRC-RANDOM-PREDICTABLE-SEED", "SecureRandom seeded with a fixed or constant value",
+         # CWE-330: SecureRandom.setSeed(constant) or new SecureRandom(byte[] literal)
+         # reduces entropy to zero — the sequence becomes fully predictable.
+         re.compile(
+             r"(?:new\s+SecureRandom\s*\(\s*(?:"
+             r"[\x22\x27][^\x22\x27]{0,64}[\x22\x27]"
+             r"|new\s+byte\s*\[\s*[\d\]]"
+             r"|\d+[Ll]?\s*\)"
+             r")|"
+             r"\.setSeed\s*\(\s*(?:"
+             r"[\x22\x27][^\x22\x27]{0,64}[\x22\x27]"
+             r"|new\s+byte\s*\[\s*[\d\]]"
+             r"|\d+[Ll]?\s*\)"
+             r"))",
+             re.I),
+         "HIGH", [], [],
+         "SecureRandom is seeded with a fixed constant or byte literal, making the "
+         "generated sequence fully predictable. An attacker who knows the seed can "
+         "reproduce all outputs. CWE-330.",
+         always_report=True, kind="antipattern",
+         fix="Never seed SecureRandom explicitly — the JVM seeds it from OS entropy by "
+             "default. If you must seed (e.g. for testing), use "
+             "SecureRandom.getInstanceStrong() in production code."),
+
+    Rule("SpringSecurityCheck-REGEX-NO-DOTALL",
+         "RegexRequestMatcher without case-insensitive flag (auth-bypass via newline)",
+         # Semgrep: spring-security-regex-matcher-without-dotall
+         # A regex like /admin/.* without Pattern.CASE_INSENSITIVE can be bypassed
+         # by injecting a newline before the path (CVE-2022-22978 class).
+         re.compile(
+             r"new\s+RegexRequestMatcher\s*\(\s*[\x22\x27][^\x22\x27]{1,200}[\x22\x27]"
+             r"(?:\s*,\s*null\s*)?\s*\)",
+             re.I),
+         "HIGH", [], [],
+         "RegexRequestMatcher is constructed without the case-insensitive flag. "
+         "A path like /Admin%0a bypasses patterns like /admin/.* because the regex "
+         "anchor does not span the injected newline. CVE-2022-22978 class.",
+         always_report=True, kind="antipattern",
+         fix="Pass Pattern.CASE_INSENSITIVE as the second argument to RegexRequestMatcher, "
+             "or use AntPathRequestMatcher / MvcRequestMatcher for simpler path patterns."),
+
+    Rule("SpringSecurityCheck-PREAUTH-ON-INTERFACE",
+         "@PreAuthorize or @PostAuthorize on an interface method",
+         # Semgrep: spring-security-annotation-on-interface
+         # Spring AOP proxies intercept calls on concrete classes, not interfaces —
+         # annotations on interface methods are silently ignored at runtime.
+         re.compile(
+             r"@(?:PreAuthorize|PostAuthorize|Secured|RolesAllowed)\s*\([^)]{0,200}\)"
+             r"(?:\s*(?:@\w+(?:\([^)]*\))?\s*)*)?"
+             r"\s+(?:public\s+)?(?:abstract\s+)?[\w<>\[\],.?\s]{1,80}\s+\w+\s*\(",
+             re.I | re.S),
+         "MEDIUM", [[("METHOD_SECURITY_ENABLED", True)]], [],
+         "A security annotation (@PreAuthorize/@PostAuthorize/@Secured) appears on what "
+         "may be an interface method. Spring Security uses AOP proxies on concrete classes; "
+         "annotations on interface methods are silently ignored at runtime, leaving the "
+         "method effectively unprotected.",
+         always_report=True, kind="sink",
+         fix="Move @PreAuthorize/@PostAuthorize to the concrete implementation class. "
+             "Enable global method security with @EnableMethodSecurity(proxyTargetClass=true) "
+             "to ensure annotations on target classes (not proxy interfaces) are applied."),
+
+    Rule("SRC-SSTI-VIEW-NAME", "Spring MVC view name derived from a request parameter",
+         # CWE-094: Returning a view name that contains a request parameter value allows
+         # attackers to trigger open-redirect (redirect:http://evil.com) or SSTI
+         # (e.g. Groovy template engines evaluate __${{7*7}}__::x).
+         # Pattern: a controller method returns a String that contains or is built from
+         # request parameter input (getParameter / @RequestParam variable).
+         re.compile(
+             r"return\s+(?:"
+             r"[\x22\x27](?:redirect:|forward:)[^\x22\x27]{0,200}[\x22\x27]\s*\+\s*\w+"
+             r"|[\x22\x27]redirect:[\x22\x27]\s*\+\s*\w+"
+             r"|[\x22\x27]forward:[\x22\x27]\s*\+\s*\w+"
+             r"|\w+\s*\+\s*[\x22\x27](?::|/|\\.)"
+             r")",
+             re.I),
+         "HIGH", [], [],
+         "A Spring MVC controller returns a view name constructed by concatenating a "
+         "request-controlled variable. This enables open redirect via redirect: prefix "
+         "and potential Server-Side Template Injection (SSTI) in some template engines. "
+         "CWE-094.",
+         always_report=True, kind="sink",
+         fix="Never concatenate user input into a view name or redirect target. "
+             "Use an allowlist of valid view names or redirect URIs and look up "
+             "by a safe key. For redirects, use UriComponentsBuilder with explicit "
+             "host/path validation."),
 ]
+
+
 
 # --- 2b) positive hardening measures ---------------------------------------
 # Unlike the sink/antipattern rules above, these do not describe a risk that
@@ -4408,6 +6602,107 @@ HARDENING_RULES: List[Rule] = [
          re.compile(r"@(?:NotNull|NotBlank|NotEmpty|Size|Email|Pattern|Digits|Min|Max|Positive|Negative)\b"),
          "LOW", [], [], kind="hardening",
          note="A Bean Validation constraint annotation enforces a concrete rule on this field/parameter.",
+         fix=""),
+    Rule("HARDEN-JWT-STRONG-ALG", "JWT uses an asymmetric or modern HMAC algorithm",
+         # Flags RS256/RS384/RS512, ES256/ES384/ES512, PS256/PS384/PS512 in signWith() calls
+         # and explicit algorithm enum references.
+         re.compile(
+             r"\.signWith\s*\([^)\n]{0,120}"
+             r"(?:RS(?:256|384|512)|ES(?:256|384|512)|PS(?:256|384|512))"
+             r"|SignatureAlgorithm\.(?:RS|ES|PS)\d+",
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="JWT is signed with a strong asymmetric or HMAC-SHA-384/512 algorithm "
+              "rather than the weak HS256 default.",
+         fix=""),
+    Rule("HARDEN-JWT-EXPIRY-SET", "JWT explicitly sets an expiration claim",
+         re.compile(r"\.(?:expiration|setExpiration)\s*\(", re.I),
+         "LOW", [], [], kind="hardening",
+         note="JWT builder sets an expiration (exp) claim, bounding the token lifetime.",
+         fix=""),
+    Rule("HARDEN-JWT-ISSUER-VALIDATION", "JWT parser validates the issuer claim",
+         re.compile(
+             r"\.requireIssuer\s*\(|"
+             r"JwtValidators\.createDefaultWithIssuer\s*\(|"
+             r"new\s+JwtClaimValidator\s*<[^>]{0,30}>\s*\(\s*[\x22\x27]iss[\x22\x27]",
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="JWT issuer validation is enforced, preventing tokens from foreign issuers "
+              "from being accepted.",
+         fix=""),
+    Rule("HARDEN-JWT-SECRET-FROM-ENV", "JWT secret sourced from environment / config, not hardcoded",
+         # Matches @Value injection, System.getenv(), env.getProperty(), and
+         # SecretsManager / Vault client patterns - all better than a string literal.
+         re.compile(
+             r"@Value\s*\(\s*[\x22\x27]\$\{[^}]+\}[\x22\x27]\s*\)\s*"
+             r"(?:private\s+)?(?:String|byte\[\]|SecretKey)[^;\n]{0,80}"
+             r"(?:secret|key|jwt|sign)"
+             r"|System\.getenv\s*\([^)]{0,40}(?:secret|key|jwt|sign)"
+             r"|env\.getProperty\s*\([^)]{0,40}(?:secret|key|jwt|sign)"
+             r"|secretsManager\.getSecretValue|vault\.read",
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="The JWT secret/key is loaded from an environment variable, config property, "
+              "or secrets manager rather than being hardcoded in source.",
+         fix=""),
+    Rule("HARDEN-JWT-AUDIENCE-VALIDATION", "JWT parser enforces audience claim",
+         re.compile(
+             r"\.requireAudience\s*\(|"
+             # JwtClaimValidator may have a complex generic like <List<String>> and a
+             # fully-qualified class prefix — match on "aud" following the class name
+             r"JwtClaimValidator[^(]{0,100}\(\s*[\x22\x27]aud[\x22\x27]",
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="JWT audience (aud) claim validation is enforced, preventing token replay "
+              "from one service to another sharing the same signing key.",
+         fix=""),
+    Rule("HARDEN-JWT-CLOCK-SKEW", "JWT clock skew tolerance explicitly bounded",
+         re.compile(
+             # Covers both short form (Duration.ofMinutes) and FQN (java.time.Duration.ofMinutes)
+             r"JwtTimestampValidator\s*\([^)]{0,80}Duration\s*\.\s*of(?:Minutes|Seconds)\s*\(",
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="An explicit clock skew tolerance is configured on the JWT timestamp validator, "
+              "bounding the window in which expired tokens remain accepted.",
+         fix=""),
+    Rule("HARDEN-OAUTH2-PKCE-ENABLED", "OAuth2 PKCE (code_challenge) explicitly enabled",
+         re.compile(
+             r"PkceParameterNames|code_challenge|"
+             r"\.requireProofKey\s*\(\s*true\s*\)|"
+             r"OAuth2AuthorizationRequest[^;\n]{0,120}codeChallenge",
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="PKCE (Proof Key for Code Exchange) is explicitly enabled, "
+              "protecting the authorization code grant from interception.",
+         fix=""),
+    Rule("HARDEN-OAUTH2-STATE-PARAM", "OAuth2 state parameter generated per request",
+         re.compile(
+             r"\.state\s*\([^)]{0,120}(?:UUID|random|SecureRandom|nonce|csrf)",
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="A cryptographically random state parameter is generated per OAuth2 request, "
+              "protecting the callback from CSRF.",
+         fix=""),
+    Rule("HARDEN-CRYPTO-GCM-RANDOM-IV", "AES-GCM IV generated with SecureRandom",
+         # Positive counterpart of SRC-CRYPTO-STATIC-IV: SecureRandom.nextBytes(iv)
+         # followed by GCMParameterSpec confirms the IV is freshly randomised.
+         re.compile(
+             r"(?:new\s+SecureRandom\s*\(\s*\)|SecureRandom\s*\.\s*getInstanceStrong\s*\(\s*\))[^;\n]{0,200}?\.nextBytes\s*\(|"
+             r"SecureRandom[^;\n]{0,120}\.nextBytes\s*\([^)]{0,60}\)"
+             r"[^;\n]{0,200}?GCMParameterSpec",
+             re.I | re.S),
+         "LOW", [], [], kind="hardening",
+         note="The GCM IV is generated with SecureRandom.nextBytes(), ensuring a "
+              "unique, unpredictable nonce for every encryption operation.",
+         fix=""),
+    Rule("HARDEN-RSA-OAEP", "RSA encryption uses OAEP padding",
+         re.compile(
+             r'Cipher\s*\.\s*getInstance\s*\(\s*[\x22\x27]'
+             r'RSA/ECB/OAEPWith',
+             re.I),
+         "LOW", [], [], kind="hardening",
+         note="RSA encryption uses OAEP padding (OAEPWithSHA-*/MGF1), "
+              "providing semantic security and resistance to padding oracle attacks.",
          fix=""),
 ]
 RULES.extend(HARDENING_RULES)
@@ -4922,6 +7217,13 @@ def rule_help_uri(rid: str) -> str:
         return "https://osv.dev/vulnerability/" + quote(rid[4:], safe="")
     if rid == "BOOT-ACTUATOR-WITHOUT-HEALTH":
         return "https://spring.io/security/cve-2026-40976/"
+    if rid.startswith("DPOP-"):
+        return "https://www.rfc-editor.org/rfc/rfc9449.html"
+    if rid == "OAUTH2-ISSUER-MIXUP":
+        return "https://www.rfc-editor.org/rfc/rfc9700.html"
+    if rid in {"JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED", "JWT-KEY-ISSUER-NOT-BOUND",
+               "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES", "JWE-ZIP-ENABLED"}:
+        return "https://www.rfc-editor.org/rfc/rfc8725.html"
     if rid == "SRC-REQUEST-BODY-NO-VALID":
         return "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
     if rid == "TPL-XSS-TH-UTEXT":
@@ -5189,6 +7491,1864 @@ def analyze_structured_dataflow(rel: str, text: str, context_radius: int = CONTE
     return out
 
 
+_JOSE_URL_SOURCES = {
+    "JWT-JKU-INJECTION": re.compile(
+        r"(?:getHeader|getClaim)\s*\(\s*[\x22\x27]jku[\x22\x27]\s*\)|"
+        r"(?:jwt|token|header|headers|jwsHeader|signedJWT)[^;\n]{0,100}"
+        r"\.get\s*\(\s*[\x22\x27]jku[\x22\x27]\s*\)|"
+        r"\.getJWKURL\s*\(\s*\)|\.getJwkUrl\s*\(\s*\)", re.I),
+    "JWT-X5U-INJECTION": re.compile(
+        r"(?:getHeader|getClaim)\s*\(\s*[\x22\x27]x5u[\x22\x27]\s*\)|"
+        r"(?:jwt|token|header|headers|jwsHeader|signedJWT)[^;\n]{0,100}"
+        r"\.get\s*\(\s*[\x22\x27]x5u[\x22\x27]\s*\)|"
+        r"\.getX509CertURL\s*\(\s*\)|\.getX5u\s*\(\s*\)", re.I),
+}
+
+_JOSE_REMOTE_SINK = re.compile(
+    r"JWKSet\s*\.\s*load\s*\(|new\s+RemoteJWKSet\s*[<(]|"
+    r"\.(?:withJwkSetUri|jwkSetUri|setJwkSetUri)\s*\(|"
+    r"new\s+URL\s*\(|URI\s*\.\s*create\s*\(|"
+    r"\.(?:openConnection|openStream|retrieveResource)\s*\(|"
+    r"(?:restTemplate|webClient|httpClient)\s*\.\s*"
+    r"(?:getForObject|getForEntity|exchange|get|send)\s*\(|"
+    r"(?:generateCertificate|X509CertChainUtils\s*\.\s*parse)\s*\(", re.I)
+
+
+def analyze_jose_header_url_injection(rel: str, text: str,
+                                      context_radius: int = CONTEXT_RADIUS,
+                                      method_bounds=None,
+                                      enabled: Optional[Set[str]] = None) -> List[Finding]:
+    """Track JOSE jku/x5u header URLs into remote key/certificate loaders.
+
+    The analysis is intentionally intraprocedural.  A header URL is tainted at
+    extraction, propagated through simple assignments, and reported only when
+    it reaches a network/JWKS/certificate-loading sink in the same method.
+    """
+    out: List[Finding] = []
+    lines = text.splitlines()
+    identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    allowed = set(_JOSE_URL_SOURCES) if enabled is None else set(enabled)
+    for start, _, _, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        body = text[body_start + 1:body_end]
+        tainted: Dict[str, Tuple[str, List[str]]] = {}
+        body_offset = body_start + 1
+        for statement in _flow_statements(body):
+            expression = statement.expression or statement.text
+            direct = [(rid, pattern.search(expression))
+                      for rid, pattern in _JOSE_URL_SOURCES.items() if rid in allowed]
+            direct = [(rid, match) for rid, match in direct if match]
+            inherited = [(name, tainted[name]) for name in identifier.findall(expression)
+                         if name in tainted]
+            if statement.target:
+                if direct:
+                    rid = direct[0][0]
+                    tainted[statement.target] = (rid, [rid.split("-")[1].lower(), statement.target])
+                elif inherited:
+                    _, (rid, path) = inherited[0]
+                    tainted[statement.target] = (rid, path + [statement.target])
+
+            sink = _JOSE_REMOTE_SINK.search(statement.text)
+            if not sink:
+                continue
+            candidates: List[Tuple[str, List[str]]] = []
+            for rid, _ in direct:
+                candidates.append((rid, [rid.split("-")[1].lower()]))
+            for name in identifier.findall(statement.text):
+                if name in tainted:
+                    rid, path = tainted[name]
+                    candidates.append((rid, path))
+            seen: Set[str] = set()
+            for rid, path in candidates:
+                if rid in seen or rid not in allowed:
+                    continue
+                seen.add(rid)
+                position = body_offset + statement.offset + sink.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else statement.text.strip()[:200]
+                header = "jku" if rid == "JWT-JKU-INJECTION" else "x5u"
+                flow = path + [sink.group(0).strip()]
+                out.append(Finding(
+                    file=rel, line=line, rule_id=rid,
+                    rule_name=RULE_BY_ID[rid].name,
+                    severity="CRITICAL", status="TAINT", code=code,
+                    note=f"Attacker-controlled JWT `{header}` header URL reaches a remote "
+                         "key/certificate-loading sink: " + " -> ".join(flow) + ".",
+                    fix=FIX_JOSE_REMOTE_KEYS, flow=flow,
+                    fingerprint=fingerprint(rel, rid, code),
+                    context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_IDOR_ID_NAME = re.compile(r"(?:^|_)(?:id|userId|accountId|orderId|customerId|documentId)$", re.I)
+_IDOR_REPOSITORY_SINK = re.compile(
+    r"\b([A-Za-z_$][\w$]*(?:Repository|Repo|Dao)|(?:repository|repo|dao))\s*\.\s*"
+    r"(findById|getById|getReferenceById|deleteById|existsById|findOneById)\s*\(", re.I)
+_IDOR_AUTHZ_EVIDENCE = re.compile(
+    r"@(?:PreAuthorize|PostAuthorize|Secured|RolesAllowed)\b|"
+    r"\b(?:Authentication|Principal|SecurityContextHolder|AuthorizationManager)\b|"
+    r"\b(?:getAuthentication|getPrincipal|getAuthorities|hasPermission|checkPermission|"
+    r"currentUser|currentTenant|authenticatedUser|authenticatedTenant)\s*\(|"
+    r"\b(?:find|get|delete|exists)By\w*(?:Owner|Tenant|Organization|Principal|Username)\w*\s*\(",
+    re.I)
+
+
+def analyze_authz_idor_dataflow(rel: str, text: str,
+                                context_radius: int = CONTEXT_RADIUS,
+                                method_bounds=None) -> List[Finding]:
+    """Find @PathVariable identifiers that reach a bare repository ID lookup."""
+    out: List[Finding] = []
+    lines = text.splitlines()
+    identifier = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    for start, opening, closing, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        signature = text[start:body_start]
+        params = text[opening + 1:closing]
+        body = text[body_start + 1:body_end]
+        method_scope = signature + body
+        if _IDOR_AUTHZ_EVIDENCE.search(method_scope):
+            continue
+        paths: Dict[str, List[str]] = {}
+        for _, param in _parameter_parts(params):
+            annotation = re.search(r"@(?:[\w]+\.)*PathVariable\b(?:\s*\(([^)]*)\))?", param)
+            if not annotation:
+                continue
+            plain = re.sub(r"@(?:[\w]+\.)*\w+(?:\s*\([^)]*\))?", "", param).strip()
+            variable = re.search(r"([A-Za-z_$][\w$]*)\s*(?:\[\])?\s*$", plain)
+            route_name = annotation.group(1) or ""
+            if not variable:
+                continue
+            name = variable.group(1)
+            if not (_IDOR_ID_NAME.search(name) or
+                    re.search(r"[\x22\x27](?:id|userId|accountId|orderId|customerId|documentId)[\x22\x27]",
+                              route_name, re.I)):
+                continue
+            paths[name] = ["@PathVariable", name]
+        if not paths:
+            continue
+        body_offset = body_start + 1
+        for statement in _flow_statements(body):
+            expr_ids = [name for name in identifier.findall(statement.expression) if name in paths]
+            if statement.target and expr_ids:
+                paths[statement.target] = paths[expr_ids[0]] + [statement.target]
+            for sink in _IDOR_REPOSITORY_SINK.finditer(statement.text):
+                opening_pos = sink.end() - 1
+                closing_pos = _closing(_structure_mask(statement.text), opening_pos)
+                if closing_pos < 0:
+                    continue
+                argument = statement.text[opening_pos + 1:closing_pos]
+                arg_ids = [name for name in identifier.findall(argument) if name in paths]
+                if not arg_ids:
+                    continue
+                position = body_offset + statement.offset + sink.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else statement.text.strip()[:200]
+                flow = paths[arg_ids[0]] + [sink.group(2) + "()"]
+                out.append(Finding(
+                    file=rel, line=line, rule_id="AUTHZ-IDOR-DATAFLOW",
+                    rule_name=RULE_BY_ID["AUTHZ-IDOR-DATAFLOW"].name,
+                    severity="HIGH", status="REVIEW", code=code,
+                    note="Request-controlled object ID reaches a bare repository lookup: "
+                         + " -> ".join(flow) + ". No owner/tenant/principal or method-security "
+                           "evidence is visible in this method; verify service-level authorization.",
+                    fix=FIX_IDOR_AUTHZ, flow=flow,
+                    fingerprint=fingerprint(rel, "AUTHZ-IDOR-DATAFLOW", code),
+                    context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_JOSE_EMBEDDED_SOURCES = {
+    "JWT-EMBEDDED-JWK-TRUST": re.compile(
+        r"(?:getHeader|getClaim)\s*\(\s*[\x22\x27]jwk[\x22\x27]\s*\)|"
+        r"(?:jwt|token|header|headers|jwsHeader|signedJWT)[^;\n]{0,100}"
+        r"\.get\s*\(\s*[\x22\x27]jwk[\x22\x27]\s*\)|\.getJWK\s*\(\s*\)", re.I),
+    "JWT-X5C-TRUST": re.compile(
+        r"(?:getHeader|getClaim)\s*\(\s*[\x22\x27]x5c[\x22\x27]\s*\)|"
+        r"(?:jwt|token|header|headers|jwsHeader|signedJWT)[^;\n]{0,100}"
+        r"\.get\s*\(\s*[\x22\x27]x5c[\x22\x27]\s*\)|"
+        r"\.getX509CertChain\s*\(\s*\)", re.I),
+}
+_JOSE_KEY_SINK = re.compile(
+    r"(?:JWK|RSAKey|ECKey)\s*\.\s*parse\s*\(|"
+    r"\.(?:toPublicKey|toRSAKey|toECKey)\s*\(|"
+    r"KeyFactory[^;\n]{0,100}\.generatePublic\s*\(|"
+    r"\.(?:setSigningKey|verifyWith|createVerifier)\s*\(|"
+    r"new\s+(?:RSASSAVerifier|ECDSAVerifier|MACVerifier)\s*\(|"
+    r"createJWSVerifier\s*\(|X509CertChainUtils\s*\.\s*parse\s*\(|"
+    r"generateCertificate\s*\(", re.I)
+_X5C_CHAIN_VALIDATION = re.compile(
+    r"\b(?:CertPathValidator|TrustManagerFactory|PKIXParameters|PKIXBuilderParameters|"
+    r"checkServerTrusted|validateCertPath|certificateValidator)\b", re.I)
+
+
+def analyze_embedded_jose_key_trust(rel: str, text: str,
+                                    context_radius: int = CONTEXT_RADIUS,
+                                    method_bounds=None,
+                                    enabled: Optional[Set[str]] = None) -> List[Finding]:
+    """Track embedded jwk/x5c header material into signature/key sinks."""
+    out: List[Finding] = []
+    lines = text.splitlines()
+    identifiers = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    allowed = set(_JOSE_EMBEDDED_SOURCES) if enabled is None else set(enabled)
+    for _, _, _, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        body = text[body_start + 1:body_end]
+        x5c_validated = bool(_X5C_CHAIN_VALIDATION.search(body))
+        tainted: Dict[str, Tuple[str, List[str]]] = {}
+        body_offset = body_start + 1
+        for statement in _flow_statements(body):
+            expression = statement.expression or statement.text
+            direct = [(rid, pattern.search(expression))
+                      for rid, pattern in _JOSE_EMBEDDED_SOURCES.items() if rid in allowed]
+            direct = [(rid, match) for rid, match in direct if match]
+            inherited = [(name, tainted[name]) for name in identifiers.findall(expression)
+                         if name in tainted]
+            if statement.target:
+                if direct:
+                    rid = direct[0][0]
+                    claim = "jwk" if rid == "JWT-EMBEDDED-JWK-TRUST" else "x5c"
+                    tainted[statement.target] = (rid, [claim, statement.target])
+                elif inherited:
+                    _, (rid, path) = inherited[0]
+                    tainted[statement.target] = (rid, path + [statement.target])
+            sink = _JOSE_KEY_SINK.search(statement.text)
+            if not sink:
+                continue
+            candidates: List[Tuple[str, List[str]]] = []
+            for rid, _ in direct:
+                candidates.append((rid, ["jwk" if rid.endswith("JWK-TRUST") else "x5c"]))
+            for name in identifiers.findall(statement.text):
+                if name in tainted:
+                    candidates.append(tainted[name])
+            seen: Set[str] = set()
+            for rid, path in candidates:
+                if rid in seen or rid not in allowed or (rid == "JWT-X5C-TRUST" and x5c_validated):
+                    continue
+                seen.add(rid)
+                position = body_offset + statement.offset + sink.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else statement.text.strip()[:200]
+                flow = path + [sink.group(0).strip()]
+                out.append(Finding(
+                    file=rel, line=line, rule_id=rid, rule_name=RULE_BY_ID[rid].name,
+                    severity="CRITICAL", status="TAINT", code=code,
+                    note="Attacker-controlled JOSE header key material reaches signature/key "
+                         "construction without a configured trust anchor: " + " -> ".join(flow) + ".",
+                    fix=FIX_EMBEDDED_JOSE_KEY, flow=flow,
+                    fingerprint=fingerprint(rel, rid, code),
+                    context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_AUTHZ_MATCHER = re.compile(
+    r"\b(requestMatchers|antMatchers)\s*\((?P<args>[^)]{1,400})\)\s*\.\s*"
+    r"(?P<decision>permitAll|denyAll|anonymous|authenticated|fullyAuthenticated|rememberMe|"
+    r"hasRole|hasAnyRole|hasAuthority|hasAnyAuthority|access)\s*\(",
+    re.I | re.S)
+_AUTHZ_ANY_REQUEST = re.compile(
+    r"\banyRequest\s*\(\s*\)\s*\.\s*"
+    r"(?P<decision>permitAll|denyAll|anonymous|authenticated|fullyAuthenticated|rememberMe|"
+    r"hasRole|hasAnyRole|hasAuthority|hasAnyAuthority|access)\s*\(",
+    re.I)
+
+
+def _matcher_covers(earlier: str, later: str) -> bool:
+    if earlier in {"/**", "**", "/"}:
+        return True
+    if earlier == later:
+        return True
+    if earlier.endswith("/**"):
+        return later.startswith(earlier[:-3].rstrip("/"))
+    if earlier.endswith("/*"):
+        prefix = earlier[:-2].rstrip("/") + "/"
+        remainder = later[len(prefix):] if later.startswith(prefix) else ""
+        return bool(remainder and "/" not in remainder.strip("/"))
+    return False
+
+
+def analyze_authz_matcher_order(rel: str, text: str,
+                                context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
+    """Find first-match-wins authorization rules shadowed by earlier permitAll."""
+    entries: List[Tuple[int, str, str]] = []
+    for match in _AUTHZ_MATCHER.finditer(text):
+        paths = re.findall(r"[\x22\x27](/[^\x22\x27]*)[\x22\x27]", match.group("args"))
+        for path in paths or ["<dynamic>"]:
+            entries.append((match.start(), path, match.group("decision")))
+    for match in _AUTHZ_ANY_REQUEST.finditer(text):
+        entries.append((match.start(), "/**", match.group("decision")))
+    entries.sort()
+    lines = text.splitlines()
+    out: List[Finding] = []
+    seen: Set[Tuple[int, str]] = set()
+    for index, (position, path, decision) in enumerate(entries):
+        if decision.lower() != "permitall" or path == "<dynamic>":
+            continue
+        for later_position, later_path, later_decision in entries[index + 1:]:
+            if later_decision.lower() == "permitall" or later_path == "<dynamic>":
+                continue
+            if not _matcher_covers(path, later_path):
+                continue
+            line = text.count("\n", 0, position) + 1
+            later_line = text.count("\n", 0, later_position) + 1
+            if (line, path) in seen:
+                break
+            seen.add((line, path))
+            code = lines[line - 1].strip() if 1 <= line <= len(lines) else path
+            severity = "CRITICAL" if path in {"/**", "**", "/"} else "HIGH"
+            out.append(Finding(
+                file=rel, line=line, rule_id="AUTHZ-MATCHER-ORDER",
+                rule_name=RULE_BY_ID["AUTHZ-MATCHER-ORDER"].name,
+                severity=severity, status="ANTIPATTERN", code=code,
+                note=f"Earlier `{path}.permitAll()` shadows the later restrictive "
+                     f"`{later_path}` matcher at line {later_line}; Spring Security uses the first match.",
+                fix=FIX_AUTHZ_ORDER,
+                fingerprint=fingerprint(rel, "AUTHZ-MATCHER-ORDER", code),
+                context=context_lines(lines, line, context_radius)))
+            break
+    return out
+
+
+@dataclass
+class SecurityChainSummary:
+    position: int
+    line: int
+    order: int
+    patterns: List[str]
+    catch_all: bool
+    code: str
+
+
+def _security_filter_chains(text: str, method_bounds=None) -> List[SecurityChainSummary]:
+    """Extract SecurityFilterChain method order and top-level securityMatcher scope."""
+    lines = text.splitlines()
+    chains: List[SecurityChainSummary] = []
+    for start, _, _, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        header = text[start:body_start]
+        if not re.search(r"\bSecurityFilterChain\b", header):
+            continue
+        body = text[body_start + 1:body_end]
+        order_match = re.search(r"@Order\s*\(\s*(\d+)\s*\)", header)
+        order = int(order_match.group(1)) if order_match else 1000
+        patterns: List[str] = []
+        for matcher in re.finditer(r"\.(?:securityMatcher|requestMatcher)\s*\(([^)]{0,300})\)", body, re.S):
+            patterns.extend(re.findall(r"[\x22\x27](/[^\x22\x27]*)[\x22\x27]", matcher.group(1)))
+        catch_all = not patterns or any(path in {"/**", "**", "/"} for path in patterns)
+        line = text.count("\n", 0, start) + 1
+        code = lines[line - 1].strip() if 1 <= line <= len(lines) else "SecurityFilterChain"
+        chains.append(SecurityChainSummary(start, line, order, patterns, catch_all, code))
+    return chains
+
+
+def analyze_security_filter_chains(rel: str, text: str,
+                                   context_radius: int = CONTEXT_RADIUS,
+                                   method_bounds=None,
+                                   enabled: Optional[Set[str]] = None) -> List[Finding]:
+    """Check multiple filter-chain order and the presence of a catch-all fallback."""
+    allowed = ({"AUTHZ-SECURITYFILTERCHAIN-ORDER", "AUTHZ-FILTERCHAIN-NO-FALLBACK"}
+               if enabled is None else enabled)
+    lines = text.splitlines()
+    chains = _security_filter_chains(text, method_bounds)
+    out: List[Finding] = []
+    ordered = sorted(chains, key=lambda chain: (chain.order, chain.position))
+    if "AUTHZ-SECURITYFILTERCHAIN-ORDER" in allowed:
+        for index, earlier in enumerate(ordered):
+            for later in ordered[index + 1:]:
+                covered = earlier.catch_all or any(
+                    _matcher_covers(first, second)
+                    for first in earlier.patterns for second in later.patterns)
+                if not covered:
+                    continue
+                later_scope = ", ".join(later.patterns) or "all requests"
+                earlier_scope = ", ".join(earlier.patterns) or "all requests"
+                out.append(Finding(
+                    file=rel, line=earlier.line,
+                    rule_id="AUTHZ-SECURITYFILTERCHAIN-ORDER",
+                    rule_name=RULE_BY_ID["AUTHZ-SECURITYFILTERCHAIN-ORDER"].name,
+                    severity="CRITICAL" if earlier.catch_all else "HIGH",
+                    status="ANTIPATTERN", code=earlier.code,
+                    note=f"SecurityFilterChain order {earlier.order} ({earlier_scope}) can match "
+                         f"before order {later.order} ({later_scope}) at line {later.line}.",
+                    fix=FIX_FILTER_CHAINS,
+                    fingerprint=fingerprint(rel, "AUTHZ-SECURITYFILTERCHAIN-ORDER", earlier.code),
+                    context=context_lines(lines, earlier.line, context_radius)))
+                break
+    if ("AUTHZ-FILTERCHAIN-NO-FALLBACK" in allowed and chains and
+            not any(chain.catch_all for chain in chains)):
+        first = min(chains, key=lambda chain: chain.position)
+        scopes = sorted({path for chain in chains for path in chain.patterns})
+        out.append(Finding(
+            file=rel, line=first.line, rule_id="AUTHZ-FILTERCHAIN-NO-FALLBACK",
+            rule_name=RULE_BY_ID["AUTHZ-FILTERCHAIN-NO-FALLBACK"].name,
+            severity="HIGH", status="REVIEW", code=first.code,
+            note="Every user-defined SecurityFilterChain is scoped (" + ", ".join(scopes) +
+                 "), but no catch-all fallback chain is visible. Verify unmatched endpoints are protected.",
+            fix=FIX_FILTER_CHAINS,
+            fingerprint=fingerprint(rel, "AUTHZ-FILTERCHAIN-NO-FALLBACK", first.code),
+            context=context_lines(lines, first.line, context_radius)))
+    return out
+
+
+_ID_TOKEN_SOURCE = re.compile(
+    r"\.getIdToken\s*\(\s*\)|\bOidcIdToken\b|\b(?:idToken|id_token)\b", re.I)
+_BEARER_SINK = re.compile(
+    r"\.setBearerAuth\s*\(|new\s+BearerTokenAuthenticationToken\s*\(|"
+    r"(?:\.header|\.set|\.add)\s*\(\s*(?:HttpHeaders\s*\.\s*AUTHORIZATION|"
+    r"[\x22\x27]Authorization[\x22\x27])|[\x22\x27]Bearer\s+[\x22\x27]\s*\+", re.I)
+
+
+def analyze_idtoken_as_access_token(rel: str, text: str,
+                                    context_radius: int = CONTEXT_RADIUS,
+                                    method_bounds=None) -> List[Finding]:
+    """Track OIDC ID-token values into outbound/API Bearer-token sinks."""
+    out: List[Finding] = []
+    lines = text.splitlines()
+    identifiers = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    for _, opening, closing, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        params = text[opening + 1:closing]
+        body = text[body_start + 1:body_end]
+        tainted: Dict[str, List[str]] = {}
+        for _, param in _parameter_parts(params):
+            variable = re.search(r"([A-Za-z_$][\w$]*)\s*(?:\[\])?\s*$", param.strip())
+            if variable and re.search(r"(?:idToken|id_token|OidcIdToken)", param, re.I):
+                tainted[variable.group(1)] = ["OIDC id_token", variable.group(1)]
+        body_offset = body_start + 1
+        for statement in _flow_statements(body):
+            expression = statement.expression or statement.text
+            inherited = [name for name in identifiers.findall(expression) if name in tainted]
+            direct = _ID_TOKEN_SOURCE.search(expression)
+            if statement.target:
+                if direct:
+                    tainted[statement.target] = ["OIDC id_token", statement.target]
+                elif inherited:
+                    tainted[statement.target] = tainted[inherited[0]] + [statement.target]
+            sink = _BEARER_SINK.search(statement.text)
+            if not sink:
+                continue
+            used = [name for name in identifiers.findall(statement.text) if name in tainted]
+            if not used and not _ID_TOKEN_SOURCE.search(statement.text):
+                continue
+            flow = (tainted[used[0]] if used else ["OIDC id_token"]) + [sink.group(0).strip()]
+            position = body_offset + statement.offset + sink.start()
+            line = text.count("\n", 0, position) + 1
+            code = lines[line - 1].strip() if 1 <= line <= len(lines) else statement.text.strip()[:200]
+            out.append(Finding(
+                file=rel, line=line, rule_id="OIDC-IDTOKEN-AS-ACCESS-TOKEN",
+                rule_name=RULE_BY_ID["OIDC-IDTOKEN-AS-ACCESS-TOKEN"].name,
+                severity="HIGH", status="TAINT", code=code,
+                note="An OIDC ID token reaches a Bearer-token/API authorization sink: "
+                     + " -> ".join(flow) + ".",
+                fix=FIX_TOKEN_PURPOSE, flow=flow,
+                fingerprint=fingerprint(rel, "OIDC-IDTOKEN-AS-ACCESS-TOKEN", code),
+                context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_JWT_PARSE_FOR_AUTH = re.compile(
+    r"parseClaimsJws\s*\(|parseSignedClaims\s*\(|(?:jwtDecoder|decoder)\s*\.\s*decode\s*\(|"
+    r"JWT\s*\.\s*decode\s*\(|SignedJWT\s*\.\s*parse\s*\(", re.I)
+_JWT_AUTH_SINK = re.compile(
+    r"new\s+(?:JwtAuthenticationToken|UsernamePasswordAuthenticationToken|PreAuthenticatedAuthenticationToken)\s*\(|"
+    r"SecurityContextHolder[^;\n]{0,200}setAuthentication\s*\(|"
+    r"\.setAuthorities\s*\(", re.I)
+_TOKEN_PURPOSE_CHECK = re.compile(
+    r"(?:getType|getHeader\s*\(\s*[\x22\x27]typ|getClaimAsString\s*\(\s*[\x22\x27]token_use|"
+    r"getClaim\s*\(\s*[\x22\x27](?:token_use|token_type)|[\x22\x27](?:access|at\+jwt)[\x22\x27])",
+    re.I)
+
+
+def analyze_token_semantics(rel: str, text: str,
+                            context_radius: int = CONTEXT_RADIUS,
+                            method_bounds=None,
+                            enabled: Optional[Set[str]] = None) -> List[Finding]:
+    """Review custom OIDC audience and JWT purpose validation."""
+    out: List[Finding] = []
+    lines = text.splitlines()
+    allowed = {"OIDC-AZP-NOT-VALIDATED", "JWT-TOKEN-TYPE-CONFUSION"} if enabled is None else enabled
+    for start, _, _, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        scope = text[start:body_end]
+        if "OIDC-AZP-NOT-VALIDATED" in allowed:
+            oidc = re.search(r"\b(?:OidcIdToken|OidcUser|OidcIdTokenValidator)\b|\.getIdToken\s*\(", scope)
+            audience = re.search(r"\.getAudience\s*\(\)|JwtClaimValidator[^;\n]{0,160}[\x22\x27]aud[\x22\x27]|"
+                                 r"getClaim[^;\n]{0,80}[\x22\x27]aud[\x22\x27]", scope, re.I)
+            azp = re.search(r"[\x22\x27]azp[\x22\x27]|getAuthorizedParty|getClaimAsString\s*\([^)]*azp", scope, re.I)
+            if oidc and audience and not azp:
+                position = start + audience.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else "audience validation"
+                out.append(Finding(
+                    file=rel, line=line, rule_id="OIDC-AZP-NOT-VALIDATED",
+                    rule_name=RULE_BY_ID["OIDC-AZP-NOT-VALIDATED"].name,
+                    severity="MEDIUM", status="REVIEW", code=code,
+                    note="Custom OIDC audience validation is visible, but no azp validation is visible. "
+                         "When an ID token has multiple audiences, azp must identify this client.",
+                    fix=FIX_TOKEN_PURPOSE,
+                    fingerprint=fingerprint(rel, "OIDC-AZP-NOT-VALIDATED", code),
+                    context=context_lines(lines, line, context_radius)))
+        if "JWT-TOKEN-TYPE-CONFUSION" in allowed:
+            parser = _JWT_PARSE_FOR_AUTH.search(scope)
+            sink = _JWT_AUTH_SINK.search(scope)
+            if parser and sink and not _TOKEN_PURPOSE_CHECK.search(scope):
+                position = start + sink.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else "Authentication"
+                out.append(Finding(
+                    file=rel, line=line, rule_id="JWT-TOKEN-TYPE-CONFUSION",
+                    rule_name=RULE_BY_ID["JWT-TOKEN-TYPE-CONFUSION"].name,
+                    severity="HIGH", status="REVIEW", code=code,
+                    note="A custom JWT parsing path constructs Authentication without visible "
+                         "typ/token_use validation; an ID/refresh token may be confused with an access token.",
+                    fix=FIX_TOKEN_PURPOSE,
+                    fingerprint=fingerprint(rel, "JWT-TOKEN-TYPE-CONFUSION", code),
+                    context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_NESTED_JWE = re.compile(r"EncryptedJWT\s*\.\s*parse\s*\(|JWEObject\s*\.\s*parse\s*\(|\.decrypt\s*\(", re.I)
+_NESTED_CLAIMS_USE = re.compile(
+    r"\.getJWTClaimsSet\s*\(|JWTClaimsSet\s*\.\s*parse\s*\(|"
+    r"\.getPayload\s*\(\s*\)[^;\n]{0,100}\.(?:toJSONObject|toString)\s*\(|"
+    r"SignedJWT\s*\.\s*parse\s*\(", re.I)
+_INNER_JWS_VERIFY = re.compile(
+    r"(?:inner|signed|nested|jws)[A-Za-z0-9_$]*\s*\.\s*verify\s*\(|"
+    r"JwtDecoder[^;\n]{0,120}\.decode\s*\(|DefaultJWTProcessor[^;\n]{0,120}\.process\s*\(", re.I)
+_CUSTOM_KEY_RESOLVER = re.compile(
+    r"\b(?:SigningKeyResolver|SigningKeyResolverAdapter|JWTClaimsSetAwareJWSKeySelector|"
+    r"JWSKeySelector|setSigningKeyResolver|selectJWSKeys)\b", re.I)
+_KEY_ID_USE = re.compile(r"getKeyID\s*\(|getHeader\s*\([^)]*[\x22\x27]kid|get\s*\([^)]*[\x22\x27]kid", re.I)
+_ISSUER_KEY_BINDING = re.compile(
+    r"requireIssuer|createDefaultWithIssuer|getIssuer\s*\(|[\x22\x27]iss[\x22\x27]|"
+    r"issuer[^;\n]{0,100}(?:key|jwk)|(?:key|jwk)[^;\n]{0,100}issuer", re.I)
+
+
+def analyze_jwt_advanced_semantics(rel: str, text: str,
+                                   context_radius: int = CONTEXT_RADIUS,
+                                   method_bounds=None,
+                                   enabled: Optional[Set[str]] = None) -> List[Finding]:
+    """Nested-JWT signature, issuer-key binding, and signing-key separation checks."""
+    allowed = ({"JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED", "JWT-KEY-ISSUER-NOT-BOUND",
+                "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES"} if enabled is None else enabled)
+    out: List[Finding] = []
+    lines = text.splitlines()
+    signing_keys: Dict[str, List[Tuple[str, int, str]]] = {}
+    for start, opening, _, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        header = text[start:body_start]
+        body = text[body_start + 1:body_end]
+        scope = text[start:body_end]
+        if "JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED" in allowed:
+            decrypt = _NESTED_JWE.search(scope)
+            claims = _NESTED_CLAIMS_USE.search(scope)
+            if decrypt and claims and not _INNER_JWS_VERIFY.search(scope):
+                position = start + claims.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else claims.group(0)
+                out.append(Finding(
+                    file=rel, line=line,
+                    rule_id="JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED",
+                    rule_name=RULE_BY_ID["JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED"].name,
+                    severity="CRITICAL", status="REVIEW", code=code,
+                    note="A JWE/nested token is decrypted and its inner claims are consumed, "
+                         "but inner JWS verification is not visible in the method.",
+                    fix=FIX_NESTED_JWT,
+                    fingerprint=fingerprint(rel, "JWT-NESTED-INNER-SIGNATURE-NOT-VALIDATED", code),
+                    context=context_lines(lines, line, context_radius)))
+        if ("JWT-KEY-ISSUER-NOT-BOUND" in allowed and _CUSTOM_KEY_RESOLVER.search(scope)
+                and _KEY_ID_USE.search(scope) and not _ISSUER_KEY_BINDING.search(scope)):
+            match = _CUSTOM_KEY_RESOLVER.search(scope)
+            position = start + (match.start() if match else 0)
+            line = text.count("\n", 0, position) + 1
+            code = lines[line - 1].strip() if 1 <= line <= len(lines) else "key resolver"
+            out.append(Finding(
+                file=rel, line=line, rule_id="JWT-KEY-ISSUER-NOT-BOUND",
+                rule_name=RULE_BY_ID["JWT-KEY-ISSUER-NOT-BOUND"].name,
+                severity="HIGH", status="REVIEW", code=code,
+                note="Custom key selection uses kid without a visible issuer-to-key-set binding. "
+                     "A key from another trusted issuer may validate a substituted token.",
+                fix=FIX_EMBEDDED_JOSE_KEY,
+                fingerprint=fingerprint(rel, "JWT-KEY-ISSUER-NOT-BOUND", code),
+                context=context_lines(lines, line, context_radius)))
+        if "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES" in allowed:
+            name_match = re.search(r"([A-Za-z_$][\w$]*)\s*$", text[start:opening])
+            method_name = name_match.group(1) if name_match else ""
+            token_type = None
+            if re.search(r"access", method_name + header, re.I):
+                token_type = "access"
+            elif re.search(r"refresh", method_name + header, re.I):
+                token_type = "refresh"
+            elif re.search(r"(?:idToken|identityToken)", method_name + header, re.I):
+                token_type = "id"
+            if token_type:
+                for sign in re.finditer(r"\.signWith\s*\(\s*([A-Za-z_$][\w$]*)", body):
+                    key = sign.group(1)
+                    position = body_start + 1 + sign.start()
+                    line = text.count("\n", 0, position) + 1
+                    code = lines[line - 1].strip() if 1 <= line <= len(lines) else sign.group(0)
+                    signing_keys.setdefault(key, []).append((token_type, line, code))
+    if "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES" in allowed:
+        for key, uses in signing_keys.items():
+            types = sorted({token_type for token_type, _, _ in uses})
+            if len(types) < 2:
+                continue
+            _, line, code = uses[0]
+            out.append(Finding(
+                file=rel, line=line, rule_id="JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES",
+                rule_name=RULE_BY_ID["JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES"].name,
+                severity="HIGH", status="REVIEW", code=code,
+                note=f"Signing key `{key}` is reused for token types: {', '.join(types)}. "
+                     "Use distinct keys and mutually exclusive validation profiles.",
+                fix=FIX_TOKEN_PURPOSE,
+                fingerprint=fingerprint(rel, "JWT-SAME-KEY-FOR-MULTIPLE-TOKEN-TYPES", code),
+                context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_OAUTH_CALLBACK = re.compile(
+    r"@(?:Get|Post)Mapping\s*\([^)]*(?:callback|login/oauth2/code)|"
+    r"OAuth2AuthorizationResponse|authorizationCode\s*\(|exchangeAuthorizationCode", re.I)
+_OAUTH_ISSUER_BINDING = re.compile(
+    r"(?:authorizationResponse|getAuthorizationResponse)[^;\n]{0,100}getIssuer\s*\(|"
+    r"[\x22\x27]iss[\x22\x27]|issuer[^;\n]{0,100}state|state[^;\n]{0,100}issuer", re.I)
+
+
+def analyze_oauth_issuer_mixup(loaded: Dict[str, Tuple[List[str], List[Method]]],
+                               raw_map: Dict[str, List[str]], root: str,
+                               props_files: Sequence[str],
+                               context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
+    """Review custom callbacks when two or more OAuth/OIDC issuers are configured."""
+    issuer_ids: Set[str] = set()
+    for _, (lines, _) in loaded.items():
+        source = "\n".join(lines)
+        issuer_ids.update(re.findall(r"\.issuerUri\s*\(\s*[\x22\x27]([^\x22\x27]+)", source, re.I))
+    for path in props_files:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                content = strip_comments(handle.read())
+        except OSError:
+            continue
+        issuer_ids.update(re.findall(
+            r"spring\.security\.oauth2\.client\.provider\.([\w-]+)\.issuer-uri\s*[=:]", content, re.I))
+    if len(issuer_ids) < 2:
+        return []
+    out: List[Finding] = []
+    for path, (lines, _) in loaded.items():
+        source = "\n".join(lines)
+        callback = _OAUTH_CALLBACK.search(source)
+        if not callback or _OAUTH_ISSUER_BINDING.search(source):
+            continue
+        line = source.count("\n", 0, callback.start()) + 1
+        rel = os.path.relpath(path, root) if root else path
+        raw_lines = raw_map.get(path, source.splitlines())
+        code = raw_lines[line - 1].strip() if 1 <= line <= len(raw_lines) else callback.group(0)
+        finding = Finding(
+            file=rel, line=line, rule_id="OAUTH2-ISSUER-MIXUP",
+            rule_name=RULE_BY_ID["OAUTH2-ISSUER-MIXUP"].name,
+            severity="HIGH", status="REVIEW", code=code,
+            note=f"Custom OAuth callback with {len(issuer_ids)} configured issuers has no visible "
+                 "binding to the issuer selected for the authorization request.",
+            fix="Store the selected issuer with the authorization request and require the callback "
+                "issuer to match before exchanging the code.",
+            fingerprint=fingerprint(rel, "OAUTH2-ISSUER-MIXUP", code),
+            context=context_lines(raw_lines, line, context_radius))
+        if not finding_suppressed(raw_lines, finding):
+            out.append(finding)
+    return out
+
+
+_DPOP_EVIDENCE = re.compile(r"\bDPoP\b|dpop", re.I)
+_DPOP_JTI = re.compile(r"[\x22\x27]jti[\x22\x27]|getJWTID\s*\(", re.I)
+_DPOP_REPLAY = re.compile(r"putIfAbsent|replay(?:Cache|Store|Check)|jti(?:Cache|Store)|containsKey|markAsUsed", re.I)
+_DPOP_HTM = re.compile(r"[\x22\x27]htm[\x22\x27]|getHttpMethod|validateHtm", re.I)
+_DPOP_HTU = re.compile(r"[\x22\x27]htu[\x22\x27]|getHttpUri|validateHtu", re.I)
+_DPOP_ATH = re.compile(r"[\x22\x27]ath[\x22\x27]|accessTokenHash|validateAth", re.I)
+_DPOP_NONCE_FEATURE = re.compile(r"DPoP-Nonce|use_dpop_nonce|nonceRequired|requireNonce", re.I)
+_DPOP_NONCE_CHECK = re.compile(r"getClaim[^;\n]{0,80}[\x22\x27]nonce|validateNonce|expectedNonce", re.I)
+
+
+def analyze_dpop_validation(rel: str, text: str,
+                            context_radius: int = CONTEXT_RADIUS,
+                            method_bounds=None,
+                            enabled: Optional[Set[str]] = None) -> List[Finding]:
+    """Check validation components only in code that visibly processes DPoP proofs."""
+    all_rules = {"DPOP-JTI-NOT-REPLAY-CHECKED", "DPOP-HTM-HTU-NOT-VALIDATED",
+                 "DPOP-IAT-WINDOW-TOO-LARGE", "DPOP-ATH-NOT-VALIDATED",
+                 "DPOP-NONCE-NOT-VALIDATED"}
+    allowed = all_rules if enabled is None else enabled
+    out: List[Finding] = []
+    lines = text.splitlines()
+
+    def add(rid: str, line: int, code: str, note: str, severity: str = "HIGH",
+            status: str = "REVIEW") -> None:
+        out.append(Finding(
+            file=rel, line=line, rule_id=rid, rule_name=RULE_BY_ID[rid].name,
+            severity=severity, status=status, code=code, note=note, fix=FIX_DPOP,
+            fingerprint=fingerprint(rel, rid, code),
+            context=context_lines(lines, line, context_radius)))
+
+    for start, _, _, _, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        scope = text[start:body_end]
+        evidence = _DPOP_EVIDENCE.search(scope)
+        if not evidence:
+            continue
+        position = start + evidence.start()
+        line = text.count("\n", 0, position) + 1
+        code = lines[line - 1].strip() if 1 <= line <= len(lines) else evidence.group(0)
+        if ("DPOP-JTI-NOT-REPLAY-CHECKED" in allowed and
+                not (_DPOP_JTI.search(scope) and _DPOP_REPLAY.search(scope))):
+            add("DPOP-JTI-NOT-REPLAY-CHECKED", line, code,
+                "DPoP proof processing lacks both jti extraction and a visible atomic replay-cache check.")
+        if ("DPOP-HTM-HTU-NOT-VALIDATED" in allowed and
+                not (_DPOP_HTM.search(scope) and _DPOP_HTU.search(scope))):
+            add("DPOP-HTM-HTU-NOT-VALIDATED", line, code,
+                "DPoP proof processing does not visibly validate both htm and htu against the request.")
+        if "DPOP-IAT-WINDOW-TOO-LARGE" in allowed:
+            windows = []
+            windows.extend(int(value) * 60 for value in re.findall(
+                r"Duration\s*\.\s*ofMinutes\s*\(\s*(\d+)\s*\)", scope))
+            windows.extend(int(value) for value in re.findall(
+                r"Duration\s*\.\s*ofSeconds\s*\(\s*(\d+)\s*\)", scope))
+            if any(value > 300 for value in windows):
+                add("DPOP-IAT-WINDOW-TOO-LARGE", line, code,
+                    "DPoP proof iat/max-age acceptance window exceeds five minutes.",
+                    "MEDIUM", "ANTIPATTERN")
+        if ("DPOP-ATH-NOT-VALIDATED" in allowed and
+                re.search(r"accessToken|Bearer", scope, re.I) and not _DPOP_ATH.search(scope)):
+            add("DPOP-ATH-NOT-VALIDATED", line, code,
+                "DPoP proof is processed with an access token, but ath validation is not visible.")
+        if ("DPOP-NONCE-NOT-VALIDATED" in allowed and _DPOP_NONCE_FEATURE.search(scope)
+                and not _DPOP_NONCE_CHECK.search(scope)):
+            add("DPOP-NONCE-NOT-VALIDATED", line, code,
+                "DPoP nonce support is enabled/emitted, but proof nonce validation is not visible.")
+    return out
+
+
+_REFRESH_FLOW = re.compile(r"\brefresh[_A-Z]?token\b|/refresh\b|refreshToken", re.I)
+_ACCESS_ISSUE = re.compile(r"generateAccessToken|createAccessToken|issueAccessToken|accessToken\s*=|Jwts\s*\.\s*builder", re.I)
+_REFRESH_ROTATION = re.compile(
+    r"rotate(?:RefreshToken)?|generateRefreshToken|createRefreshToken|newRefreshToken|"
+    r"refreshTokenRepository\s*\.\s*(?:delete|save)|revoke[^;\n]{0,80}refresh|"
+    r"invalidate[^;\n]{0,80}refresh|replace[^;\n]{0,80}refresh", re.I)
+
+
+def analyze_refresh_rotation(rel: str, text: str,
+                             context_radius: int = CONTEXT_RADIUS,
+                             method_bounds=None) -> List[Finding]:
+    """Find refresh flows that issue access tokens without rotating refresh tokens."""
+    out: List[Finding] = []
+    lines = text.splitlines()
+    for start, _, _, body_start, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        scope = text[start:body_end]
+        refresh = _REFRESH_FLOW.search(scope)
+        issue = _ACCESS_ISSUE.search(scope)
+        if not refresh or not issue or _REFRESH_ROTATION.search(scope):
+            continue
+        position = start + issue.start()
+        line = text.count("\n", 0, position) + 1
+        code = lines[line - 1].strip() if 1 <= line <= len(lines) else "refresh"
+        out.append(Finding(
+            file=rel, line=line, rule_id="REFRESH-TOKEN-NO-ROTATION",
+            rule_name=RULE_BY_ID["REFRESH-TOKEN-NO-ROTATION"].name,
+            severity="HIGH", status="REVIEW", code=code,
+            note="This refresh flow issues a new access token but no refresh-token replacement "
+                 "or old-token revocation is visible in the method.",
+            fix=FIX_REFRESH_LIFECYCLE,
+            fingerprint=fingerprint(rel, "REFRESH-TOKEN-NO-ROTATION", code),
+            context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_PKCS12_CONTEXT = re.compile(r"KeyStore\s*\.\s*getInstance\s*\(\s*[\x22\x27](?:PKCS12|PKCS#12)[\x22\x27]", re.I)
+_EMPTY_KEYSTORE_PASSWORD = re.compile(
+    r"\.(?:load|store)\s*\([^;\n]{0,240},\s*(?:null|new\s+char\s*\[\s*0\s*\]|"
+    r"new\s+char\s*\[\s*\]\s*\{\s*\}|[\x22\x27][\x22\x27]\s*\.\s*toCharArray\s*\(\s*\))\s*\)",
+    re.I)
+
+
+def analyze_pkcs12_empty_password(rel: str, text: str,
+                                  context_radius: int = CONTEXT_RADIUS,
+                                  method_bounds=None) -> List[Finding]:
+    out: List[Finding] = []
+    lines = text.splitlines()
+    for start, _, _, _, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        scope = text[start:body_end]
+        if not _PKCS12_CONTEXT.search(scope):
+            continue
+        empty = _EMPTY_KEYSTORE_PASSWORD.search(scope)
+        if not empty:
+            continue
+        position = start + empty.start()
+        line = text.count("\n", 0, position) + 1
+        code = lines[line - 1].strip() if 1 <= line <= len(lines) else empty.group(0)
+        out.append(Finding(
+            file=rel, line=line, rule_id="CERT-EMPTY-PKCS12-PASSWORD",
+            rule_name=RULE_BY_ID["CERT-EMPTY-PKCS12-PASSWORD"].name,
+            severity="HIGH", status="ANTIPATTERN", code=code,
+            note="PKCS12 keystore load/store uses a null or empty password.",
+            fix=RULE_BY_ID["CERT-EMPTY-PKCS12-PASSWORD"].fix,
+            fingerprint=fingerprint(rel, "CERT-EMPTY-PKCS12-PASSWORD", code),
+            context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_RESET_EVIDENCE = re.compile(r"resetPassword|forgotPassword|passwordReset|ResetToken|reset[_-]?token", re.I)
+_RESET_GENERATION = re.compile(r"(?:generate|create|new)[A-Za-z0-9_$]*(?:Reset)?Token|resetToken\s*=|ResetToken\s*\(", re.I)
+_RESET_EXPIRY = re.compile(r"expir|expires|validUntil|ttl|timeToLive|Duration\s*\.|\.plus(?:Seconds|Minutes|Hours)\s*\(", re.I)
+_RESET_PREDICTABLE = re.compile(
+    r"Math\s*\.\s*random\s*\(|new\s+Random\s*\(|System\s*\.\s*(?:currentTimeMillis|nanoTime)\s*\(|"
+    r"(?:username|email|userId)[^;\n]{0,120}(?:hashCode|digest|encode)|AtomicLong|incrementAndGet", re.I)
+_PASSWORD_CHANGE = re.compile(r"setPassword\s*\(|updatePassword\s*\(|changePassword\s*\(|passwordEncoder\s*\.\s*encode", re.I)
+_RESET_CONSUME = re.compile(r"findByToken|validateResetToken|verifyResetToken|getResetToken|resetTokenRepository", re.I)
+_RESET_INVALIDATE = re.compile(r"(?:delete|remove|revoke|consume|markUsed|invalidate)[^;\n]{0,100}(?:reset|token)|"
+                               r"(?:reset|token)[^;\n]{0,100}(?:setUsed|usedAt|consumedAt)", re.I)
+
+
+def analyze_password_reset(rel: str, text: str,
+                           context_radius: int = CONTEXT_RADIUS,
+                           method_bounds=None,
+                           enabled: Optional[Set[str]] = None) -> List[Finding]:
+    all_rules = {"PASSWORD-RESET-NO-EXPIRY", "PASSWORD-RESET-TOKEN-REUSE",
+                 "PASSWORD-RESET-PREDICTABLE-TOKEN"}
+    allowed = all_rules if enabled is None else enabled
+    out: List[Finding] = []
+    lines = text.splitlines()
+    for start, _, _, _, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        scope = text[start:body_end]
+        evidence = _RESET_EVIDENCE.search(scope)
+        if not evidence:
+            continue
+        line = text.count("\n", 0, start + evidence.start()) + 1
+        code = lines[line - 1].strip() if 1 <= line <= len(lines) else evidence.group(0)
+        if ("PASSWORD-RESET-PREDICTABLE-TOKEN" in allowed and
+                _RESET_GENERATION.search(scope) and _RESET_PREDICTABLE.search(scope)):
+            out.append(Finding(
+                file=rel, line=line, rule_id="PASSWORD-RESET-PREDICTABLE-TOKEN",
+                rule_name=RULE_BY_ID["PASSWORD-RESET-PREDICTABLE-TOKEN"].name,
+                severity="CRITICAL", status="ANTIPATTERN", code=code,
+                note="Password-reset token generation uses a predictable time value or non-cryptographic RNG.",
+                fix=FIX_PASSWORD_RESET,
+                fingerprint=fingerprint(rel, "PASSWORD-RESET-PREDICTABLE-TOKEN", code),
+                context=context_lines(lines, line, context_radius)))
+        if ("PASSWORD-RESET-NO-EXPIRY" in allowed and _RESET_GENERATION.search(scope)
+                and not _RESET_EXPIRY.search(scope)):
+            out.append(Finding(
+                file=rel, line=line, rule_id="PASSWORD-RESET-NO-EXPIRY",
+                rule_name=RULE_BY_ID["PASSWORD-RESET-NO-EXPIRY"].name,
+                severity="HIGH", status="REVIEW", code=code,
+                note="Reset-token generation/storage is visible, but no expiry or TTL is visible in the method.",
+                fix=FIX_PASSWORD_RESET,
+                fingerprint=fingerprint(rel, "PASSWORD-RESET-NO-EXPIRY", code),
+                context=context_lines(lines, line, context_radius)))
+        if ("PASSWORD-RESET-TOKEN-REUSE" in allowed and _RESET_CONSUME.search(scope)
+                and _PASSWORD_CHANGE.search(scope) and not _RESET_INVALIDATE.search(scope)):
+            out.append(Finding(
+                file=rel, line=line, rule_id="PASSWORD-RESET-TOKEN-REUSE",
+                rule_name=RULE_BY_ID["PASSWORD-RESET-TOKEN-REUSE"].name,
+                severity="HIGH", status="REVIEW", code=code,
+                note="Password reset consumes a token and changes a password without visible atomic "
+                     "delete/revoke/used-state handling.",
+                fix=FIX_PASSWORD_RESET,
+                fingerprint=fingerprint(rel, "PASSWORD-RESET-TOKEN-REUSE", code),
+                context=context_lines(lines, line, context_radius)))
+    return out
+
+
+_CUSTOM_LOGIN = re.compile(
+    r"@PostMapping\s*\([^)]*[\x22\x27][^\x22\x27]*(?:login|authenticate|signin)|"
+    r"\b(?:login|authenticate|signIn)\s*\([^;{]*(?:password|credential)[^;{]*\)\s*(?:throws[^\{]*)?\{",
+    re.I)
+_LOGIN_THROTTLE = re.compile(
+    r"RateLimiter|rateLimit|throttl|loginAttempt|failedAttempt|accountLock|lockout|"
+    r"Bucket4j|resilience4j|tooManyRequests|TOO_MANY_REQUESTS", re.I)
+_MFA_EVIDENCE = re.compile(r"\b(?:MFA|2FA|TOTP|OTP|secondFactor|multiFactor)\b", re.I)
+_MFA_FAIL_OPEN = re.compile(
+    r"catch\s*\([^)]*\)\s*\{(?:(?!\}).){0,500}(?:return\s+true\s*;|"
+    r"(?:skip|bypass|continueWithout)[A-Za-z0-9_$]*\s*\()|"
+    r"exceptionally\s*\([^)]*->\s*(?:true|Boolean\.TRUE)", re.I | re.S)
+
+
+def analyze_auth_resilience(rel: str, text: str,
+                            context_radius: int = CONTEXT_RADIUS,
+                            method_bounds=None,
+                            enabled: Optional[Set[str]] = None) -> List[Finding]:
+    allowed = {"AUTH-LOGIN-NO-RATE-LIMIT", "MFA-FAIL-OPEN"} if enabled is None else enabled
+    out: List[Finding] = []
+    lines = text.splitlines()
+    for start, _, _, _, body_end in (
+            _web_methods(text) if method_bounds is None else method_bounds):
+        scope = text[start:body_end]
+        if ("AUTH-LOGIN-NO-RATE-LIMIT" in allowed and _CUSTOM_LOGIN.search(scope)
+                and not _LOGIN_THROTTLE.search(scope)):
+            match = _CUSTOM_LOGIN.search(scope)
+            position = start + (match.start() if match else 0)
+            line = text.count("\n", 0, position) + 1
+            code = lines[line - 1].strip() if 1 <= line <= len(lines) else "login"
+            out.append(Finding(
+                file=rel, line=line, rule_id="AUTH-LOGIN-NO-RATE-LIMIT",
+                rule_name=RULE_BY_ID["AUTH-LOGIN-NO-RATE-LIMIT"].name,
+                severity="MEDIUM", status="REVIEW", code=code,
+                note="Custom credential endpoint has no visible throttling, failed-attempt counter, or lockout. "
+                     "Verify equivalent protection at the gateway if intentionally external.",
+                fix=RULE_BY_ID["AUTH-LOGIN-NO-RATE-LIMIT"].fix,
+                fingerprint=fingerprint(rel, "AUTH-LOGIN-NO-RATE-LIMIT", code),
+                context=context_lines(lines, line, context_radius)))
+        if "MFA-FAIL-OPEN" in allowed and _MFA_EVIDENCE.search(scope):
+            fail_open = _MFA_FAIL_OPEN.search(scope)
+            if fail_open:
+                position = start + fail_open.start()
+                line = text.count("\n", 0, position) + 1
+                code = lines[line - 1].strip() if 1 <= line <= len(lines) else fail_open.group(0)[:200]
+                out.append(Finding(
+                    file=rel, line=line, rule_id="MFA-FAIL-OPEN",
+                    rule_name=RULE_BY_ID["MFA-FAIL-OPEN"].name,
+                    severity="CRITICAL", status="ANTIPATTERN", code=code,
+                    note="MFA/TOTP/OTP exception handling returns success or invokes an explicit bypass path.",
+                    fix=RULE_BY_ID["MFA-FAIL-OPEN"].fix,
+                    fingerprint=fingerprint(rel, "MFA-FAIL-OPEN", code),
+                    context=context_lines(lines, line, context_radius)))
+    return out
+
+
+def analyze_certificate_text_file(path: str, root: str,
+                                  context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
+    """Scan PEM/key text files without attempting to parse or expose key bytes."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read(2 * 1024 * 1024)
+    except OSError:
+        return []
+    match = re.search(r"-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH)\s+)?PRIVATE KEY-----", text, re.I)
+    if not match:
+        return []
+    lines = text.splitlines()
+    line = text.count("\n", 0, match.start()) + 1
+    rel = os.path.relpath(path, root) if root else path
+    code = lines[line - 1].strip() if 1 <= line <= len(lines) else "private key header"
+    return [Finding(
+        file=rel, line=line, rule_id="CERT-PRIVATE-KEY-COMMITTED",
+        rule_name=RULE_BY_ID["CERT-PRIVATE-KEY-COMMITTED"].name,
+        severity="CRITICAL", status="ANTIPATTERN", code=code,
+        note="A private-key PEM header is present in a scanned .pem/.key file. Rotate the key.",
+        fix=RULE_BY_ID["CERT-PRIVATE-KEY-COMMITTED"].fix,
+        fingerprint=fingerprint(rel, "CERT-PRIVATE-KEY-COMMITTED", code),
+        context=context_lines(lines, line, context_radius))]
+
+
+def _group_loaded_by_module(loaded: Dict[str, Tuple[List[str], List[Method]]],
+                            root: str, build_files: Sequence[str]) -> Dict[str, List[Tuple[str, str]]]:
+    """Group loaded source text by the nearest build-file directory."""
+    module_dirs = sorted({os.path.abspath(os.path.dirname(path)) for path in build_files},
+                         key=len, reverse=True)
+    grouped: Dict[str, List[Tuple[str, str]]] = {}
+    for path, (lines, _) in loaded.items():
+        absolute = os.path.abspath(path)
+        module = os.path.abspath(root)
+        for directory in module_dirs:
+            try:
+                if os.path.commonpath((absolute, directory)) == directory:
+                    module = directory
+                    break
+            except ValueError:
+                continue
+        grouped.setdefault(module, []).append((path, "\n".join(lines)))
+    return grouped
+
+
+@dataclass
+class ProjectMethodSummary:
+    path: str
+    rel: str
+    class_name: str
+    name: str
+    line: int
+    start: int
+    params: List[str]
+    body: str
+    body_offset: int
+    body_end: int
+    header: str
+    tainted_tenants: Dict[str, List[str]] = field(default_factory=dict)
+    tainted_objects: Dict[str, List[str]] = field(default_factory=dict)
+
+
+_TENANT_NAME = re.compile(r"(?:tenant|organization|organisation|workspace|company|realm)(?:Id|ID|_id)?$", re.I)
+_TENANT_REQUEST_SOURCE = re.compile(
+    r"(?:getParameter|getHeader)\s*\(\s*[\x22\x27]"
+    r"(?:tenant|tenantId|organizationId|organisationId|workspaceId|companyId|realm)"
+    r"[\x22\x27]\s*\)", re.I)
+_OBJECT_REQUEST_SOURCE = re.compile(
+    r"(?:getParameter|getHeader)\s*\(\s*[\x22\x27]"
+    r"(?:id|userId|accountId|orderId|customerId|documentId)"
+    r"[\x22\x27]\s*\)", re.I)
+_TENANT_REPOSITORY_CALL = re.compile(
+    r"\b([A-Za-z_$][\w$]*(?:Repository|Repo|Dao)|(?:repository|repo|dao))\s*\.\s*"
+    r"((?:find|get|delete|remove|exists|save|update|count)[A-Za-z0-9_$]*)\s*\(", re.I)
+_TENANT_AUTH_BINDING = re.compile(
+    r"\b(?:currentTenant|authenticatedTenant|principalTenant|tenantFromAuthentication|"
+    r"getTenantFromPrincipal|TenantContext)\b|"
+    r"SecurityContextHolder|Authentication\b|Principal\b|"
+    r"getPrincipal\s*\(|getAuthentication\s*\(|@PreAuthorize\b", re.I)
+
+
+def _owner_class_name(text: str, position: int) -> str:
+    """Return the innermost class/object containing a source position."""
+    masked = _structure_mask(text)
+    owners: List[Tuple[int, int, str]] = []
+    for match in re.finditer(r"\b(?:class|interface|record|object)\s+([A-Za-z_$][\w$]*)[^\{]*\{",
+                             masked):
+        opening = masked.find("{", match.start(), match.end())
+        closing = _closing(masked, opening, "{", "}") if opening >= 0 else -1
+        if opening <= position <= closing:
+            owners.append((opening, closing, match.group(1)))
+    return max(owners, key=lambda item: item[0])[2] if owners else "<top-level>"
+
+
+def _project_method_summaries(loaded: Dict[str, Tuple[List[str], List[Method]]],
+                              root: str) -> List[ProjectMethodSummary]:
+    summaries: List[ProjectMethodSummary] = []
+    for path, (source_lines, _) in loaded.items():
+        if not path.endswith((".java", ".kt")):
+            continue
+        text = "\n".join(source_lines)
+        for start, opening, closing, body_start, body_end in _web_methods(text):
+            name_match = re.search(r"([A-Za-z_$][\w$]*)\s*$", text[start:opening])
+            if not name_match:
+                continue
+            params_text = text[opening + 1:closing]
+            params: List[str] = []
+            taint: Dict[str, List[str]] = {}
+            object_taint: Dict[str, List[str]] = {}
+            for _, param in _parameter_parts(params_text):
+                variable = re.search(r"([A-Za-z_$][\w$]*)\s*(?:\[\])?\s*$", param.strip())
+                if not variable:
+                    continue
+                name = variable.group(1)
+                params.append(name)
+                if (_TENANT_NAME.search(name) and
+                        re.search(r"@(?:[\w]+\.)*(?:PathVariable|RequestParam|RequestHeader|ModelAttribute)\b",
+                                  param)):
+                    taint[name] = ["request tenant", name]
+                elif (_IDOR_ID_NAME.search(name) and
+                      re.search(r"@(?:[\w]+\.)*(?:PathVariable|RequestParam|RequestHeader|ModelAttribute)\b",
+                                param)):
+                    object_taint[name] = ["request object id", name]
+            line = text.count("\n", 0, start) + 1
+            summaries.append(ProjectMethodSummary(
+                path=path, rel=os.path.relpath(path, root) if root else path,
+                class_name=_owner_class_name(text, start),
+                name=name_match.group(1), line=line, start=start, params=params,
+                body=text[body_start + 1:body_end], body_offset=body_start + 1,
+                body_end=body_end, header=text[start:body_start],
+                tainted_tenants=taint, tainted_objects=object_taint))
+    return summaries
+
+
+def analyze_interprocedural_tenant_dataflow(
+        loaded: Dict[str, Tuple[List[str], List[Method]]], raw_map: Dict[str, List[str]],
+        root: str, context_radius: int = CONTEXT_RADIUS,
+        enabled: Optional[Set[str]] = None) -> List[Finding]:
+    """Propagate request tenant/object IDs across calls and flag unbound access."""
+    allowed = ({"AUTHZ-TENANT-DATAFLOW", "AUTHZ-IDOR-DATAFLOW"}
+               if enabled is None else enabled)
+    methods = _project_method_summaries(loaded, root)
+    by_name: Dict[str, List[ProjectMethodSummary]] = {}
+    identifiers = re.compile(r"\b[A-Za-z_$][\w$]*\b")
+    for method in methods:
+        by_name.setdefault(method.name, []).append(method)
+
+    # A small fixed point propagates request tenant scope and object identifiers
+    # through assignments and controller -> service -> repository helper calls.
+    for _ in range(8):
+        changed = False
+        for method in methods:
+            for statement in _flow_statements(method.body):
+                expression = statement.expression or statement.text
+                expression_names = identifiers.findall(expression)
+                inherited_tenants = [name for name in expression_names
+                                     if name in method.tainted_tenants]
+                inherited_objects = [name for name in expression_names
+                                     if name in method.tainted_objects]
+                if statement.target:
+                    if _TENANT_REQUEST_SOURCE.search(expression) or inherited_tenants:
+                        path = (["request tenant"] if not inherited_tenants
+                                else method.tainted_tenants[inherited_tenants[0]]) + [statement.target]
+                        if method.tainted_tenants.get(statement.target) != path:
+                            method.tainted_tenants[statement.target] = path
+                            changed = True
+                    if _OBJECT_REQUEST_SOURCE.search(expression) or inherited_objects:
+                        path = (["request object id"] if not inherited_objects
+                                else method.tainted_objects[inherited_objects[0]]) + [statement.target]
+                        if method.tainted_objects.get(statement.target) != path:
+                            method.tainted_objects[statement.target] = path
+                            changed = True
+                masked = _structure_mask(statement.text)
+                for call in re.finditer(r"\b(?:[A-Za-z_$][\w$]*\s*\.\s*)*"
+                                        r"([A-Za-z_$][\w$]*)\s*\(", masked):
+                    callee_name = call.group(1)
+                    if callee_name not in by_name:
+                        continue
+                    opening = call.end() - 1
+                    closing = _closing(masked, opening)
+                    if closing < 0:
+                        continue
+                    args = [part.strip() for _, part in _parameter_parts(
+                        statement.text[opening + 1:closing])]
+                    for callee in by_name[callee_name]:
+                        if callee is method:
+                            continue
+                        if len(callee.params) != len(args):
+                            continue
+                        for index, argument in enumerate(args):
+                            target = callee.params[index]
+                            argument_names = identifiers.findall(argument)
+                            tenant_vars = [name for name in argument_names
+                                           if name in method.tainted_tenants]
+                            object_vars = [name for name in argument_names
+                                           if name in method.tainted_objects]
+                            if tenant_vars:
+                                path = (method.tainted_tenants[tenant_vars[0]] +
+                                        [callee.name + "()", target])
+                                if callee.tainted_tenants.get(target) != path:
+                                    callee.tainted_tenants[target] = path
+                                    changed = True
+                            if object_vars:
+                                path = (method.tainted_objects[object_vars[0]] +
+                                        [callee.name + "()", target])
+                                if callee.tainted_objects.get(target) != path:
+                                    callee.tainted_objects[target] = path
+                                    changed = True
+        if not changed:
+            break
+
+    out: List[Finding] = []
+    for method in methods:
+        method_scope = method.header + method.body
+        has_auth_binding = bool(_TENANT_AUTH_BINDING.search(method_scope) or
+                                _IDOR_AUTHZ_EVIDENCE.search(method_scope))
+        if has_auth_binding:
+            continue
+        masked = _structure_mask(method.body)
+        for sink in _TENANT_REPOSITORY_CALL.finditer(masked):
+            opening = sink.end() - 1
+            closing = _closing(masked, opening)
+            if closing < 0:
+                continue
+            argument = method.body[opening + 1:closing]
+            argument_names = identifiers.findall(argument)
+            tenant_args = [name for name in argument_names
+                           if name in method.tainted_tenants]
+            position = method.body_offset + sink.start()
+            source_text = "\n".join(loaded[method.path][0])
+            line = source_text.count("\n", 0, position) + 1
+            raw_lines = raw_map.get(method.path, source_text.splitlines())
+            code = raw_lines[line - 1].strip() if 1 <= line <= len(raw_lines) else sink.group(0)
+            if "AUTHZ-TENANT-DATAFLOW" in allowed and method.tainted_tenants:
+                source_name = (tenant_args[0] if tenant_args
+                               else next(iter(method.tainted_tenants)))
+                path = method.tainted_tenants[source_name] + [sink.group(2) + "()"]
+                detail = ("Request-controlled tenant scope reaches the repository call"
+                          if tenant_args else
+                          "Request tenant context is dropped before an unscoped repository call")
+                finding = Finding(
+                    file=method.rel, line=line, rule_id="AUTHZ-TENANT-DATAFLOW",
+                    rule_name=RULE_BY_ID["AUTHZ-TENANT-DATAFLOW"].name,
+                    severity="HIGH", status="TAINT", code=code,
+                    note=detail + " without visible binding to the authenticated principal: "
+                         + " -> ".join(path) + ".",
+                    fix=FIX_TENANT_AUTHZ, flow=path,
+                    fingerprint=fingerprint(method.rel, "AUTHZ-TENANT-DATAFLOW", code),
+                    context=context_lines(raw_lines, line, context_radius))
+                if not finding_suppressed(raw_lines, finding):
+                    out.append(finding)
+            object_args = [name for name in argument_names
+                           if name in method.tainted_objects]
+            if "AUTHZ-IDOR-DATAFLOW" in allowed and object_args:
+                path = method.tainted_objects[object_args[0]] + [sink.group(2) + "()"]
+                finding = Finding(
+                    file=method.rel, line=line, rule_id="AUTHZ-IDOR-DATAFLOW",
+                    rule_name=RULE_BY_ID["AUTHZ-IDOR-DATAFLOW"].name,
+                    severity="HIGH", status="TAINT", code=code,
+                    note="Request-controlled object ID crosses a method boundary and reaches "
+                         "a repository lookup without visible owner, tenant, principal, or "
+                         "method-security binding: " + " -> ".join(path) + ".",
+                    fix=FIX_IDOR_AUTHZ, flow=path,
+                    fingerprint=fingerprint(method.rel, "AUTHZ-IDOR-DATAFLOW", code),
+                    context=context_lines(raw_lines, line, context_radius))
+                if not finding_suppressed(raw_lines, finding):
+                    out.append(finding)
+    return out
+
+
+_COVERAGE_MAPPING = re.compile(
+    r"@(?:[\w]+\.)*(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|"
+    r"RequestMapping)\b(?:\s*\(([^)]*)\))?", re.I | re.S)
+_COVERAGE_CONSUMER = re.compile(
+    r"@(?:[\w]+\.)*(KafkaListener|RabbitListener|JmsListener)\b(?:\s*\(([^)]*)\))?",
+    re.I | re.S)
+_COVERAGE_SCHEDULED = re.compile(
+    r"@(?:[\w]+\.)*Scheduled\b(?:\s*\(([^)]*)\))?", re.I | re.S)
+_COVERAGE_METHOD_AUTHZ_ANNOTATION = re.compile(
+    r"@(?:PreAuthorize|PostAuthorize|Secured|RolesAllowed)\b", re.I)
+_COVERAGE_PROGRAMMATIC_AUTHZ = re.compile(
+    r"\b(?:hasRole|hasAuthority|hasPermission|checkPermission|AuthorizationManager)\s*\(", re.I)
+_COVERAGE_AUTHN = re.compile(
+    r"@AuthenticationPrincipal\b|\b(?:Authentication|Principal|SecurityContextHolder)\b|"
+    r"\b(?:getAuthentication|getPrincipal|authenticatedUser|currentUser)\s*\(", re.I)
+_COVERAGE_VALIDATION = re.compile(
+    r"@(?:Valid|Validated|NotNull|NotBlank|NotEmpty|Size|Pattern|Min|Max|Positive|Email)\b|"
+    r"\b(?:validator\.validate|validateRequest|validatePayload|validationService)\s*\(", re.I)
+_COVERAGE_RATE_LIMIT = re.compile(
+    r"\b(?:RateLimiter|rateLimit|throttl|loginAttempt|failedAttempt|accountLock|lockout|"
+    r"bucket\.tryConsume|resilience4j)\b", re.I)
+_COVERAGE_AUDIT = re.compile(
+    r"\b(?:AuditEvent|AuditEventRepository|auditService|securityAudit|auditLogger|"
+    r"recordAudit|recordSecurityEvent|publishAuditEvent)\b", re.I)
+_COVERAGE_TENANT_BINDING = re.compile(
+    r"\b(?:currentTenant|authenticatedTenant|tenantFromAuthentication|TenantContext|"
+    r"findBy\w*Tenant|deleteBy\w*Tenant|existsBy\w*Tenant|OwnerId|PrincipalId)\b", re.I)
+_COVERAGE_SENSITIVE_SINK = re.compile(
+    r"\b([A-Za-z_$][\w$]*(?:Repository|Repo|Dao)|(?:repository|repo|dao))\s*\.\s*"
+    r"((?:find|get|save|delete|remove|update|exists|count)[A-Za-z0-9_$]*)\s*\(|"
+    r"\b(?:entityManager|jdbcTemplate|namedParameterJdbcTemplate)\s*\.\s*"
+    r"(find|persist|merge|remove|update|query)\s*\(", re.I)
+_COVERAGE_MUTATING_SINK = re.compile(
+    r"\b(?:save|delete|remove|update|persist|merge)[A-Za-z0-9_$]*\s*\(", re.I)
+_COVERAGE_ABUSE_ROUTE = re.compile(
+    r"(?:login|sign[-_]?in|authenticate|token|password[^/]*(?:reset|forgot)|mfa|otp)", re.I)
+
+
+@dataclass
+class CoverageRoutePolicy:
+    file: str
+    module: str
+    position: int
+    line: int
+    pattern: str
+    decision: str
+    http_method: str = "ANY"
+
+
+def _coverage_annotation_paths(arguments: str) -> List[str]:
+    paths = re.findall(r"[\x22\x27](/[^\x22\x27]*)[\x22\x27]", arguments or "")
+    return paths or [""]
+
+
+def _coverage_join_route(prefix: str, suffix: str) -> str:
+    joined = "/".join(part.strip("/") for part in (prefix, suffix) if part.strip("/"))
+    return "/" + joined if joined else "/"
+
+
+def _coverage_class_prefix(text: str, method: ProjectMethodSummary) -> str:
+    """Extract the nearest class-level @RequestMapping prefix."""
+    masked = _structure_mask(text)
+    candidates: List[Tuple[int, int]] = []
+    for match in re.finditer(
+            r"\b(?:class|interface|record|object)\s+" + re.escape(method.class_name) +
+            r"\b[^\{]*\{", masked):
+        opening = masked.find("{", match.start(), match.end())
+        closing = _closing(masked, opening, "{", "}") if opening >= 0 else -1
+        if opening <= method.start <= closing:
+            candidates.append((match.start(), opening))
+    if not candidates:
+        return ""
+    class_start, _ = max(candidates)
+    annotation_start = max(masked.rfind("}", 0, class_start),
+                           masked.rfind(";", 0, class_start), 0)
+    preamble = text[annotation_start:class_start]
+    mappings = list(re.finditer(
+        r"@(?:[\w]+\.)*RequestMapping\b(?:\s*\(([^)]*)\))?", preamble, re.I | re.S))
+    if not mappings:
+        return ""
+    paths = _coverage_annotation_paths(mappings[-1].group(1) or "")
+    return paths[0] if paths else ""
+
+
+def _coverage_http_methods(annotation: str, arguments: str) -> List[str]:
+    fixed = {
+        "getmapping": "GET", "postmapping": "POST", "putmapping": "PUT",
+        "patchmapping": "PATCH", "deletemapping": "DELETE",
+    }
+    if annotation.lower() in fixed:
+        return [fixed[annotation.lower()]]
+    explicit = re.findall(r"RequestMethod\s*\.\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)",
+                          arguments or "", re.I)
+    return [method.upper() for method in explicit] or ["ANY"]
+
+
+def _coverage_pattern_matches(pattern: str, route: str) -> bool:
+    if pattern in {"/**", "**", "/"}:
+        return True
+    token = re.escape(pattern)
+    token = re.sub(r"\\\{[^}]+\\\}", r"[^/]+", token)
+    token = token.replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
+    return bool(re.fullmatch(token, route))
+
+
+def _coverage_module_map(
+        loaded: Dict[str, Tuple[List[str], List[Method]]], root: str,
+        build_files: Sequence[str]) -> Dict[str, str]:
+    module_map: Dict[str, str] = {}
+    for module, sources in _group_loaded_by_module(loaded, root, build_files).items():
+        for path, _ in sources:
+            module_map[path] = module
+    return module_map
+
+
+def _coverage_route_policies(
+        loaded: Dict[str, Tuple[List[str], List[Method]]], root: str,
+        module_map: Dict[str, str]) -> List[CoverageRoutePolicy]:
+    policies: List[CoverageRoutePolicy] = []
+    for path, (lines, _) in loaded.items():
+        text = "\n".join(lines)
+        rel = os.path.relpath(path, root) if root else path
+        for match in _AUTHZ_MATCHER.finditer(text):
+            patterns = re.findall(r"[\x22\x27](/[^\x22\x27]*)[\x22\x27]", match.group("args"))
+            methods = re.findall(r"HttpMethod\s*\.\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)",
+                                 match.group("args"), re.I)
+            policy_method = methods[0].upper() if len(methods) == 1 else "ANY"
+            for pattern in patterns:
+                policies.append(CoverageRoutePolicy(
+                    rel, module_map.get(path, os.path.abspath(root)), match.start(),
+                    text.count("\n", 0, match.start()) + 1,
+                    pattern, match.group("decision"), policy_method))
+        for match in _AUTHZ_ANY_REQUEST.finditer(text):
+            policies.append(CoverageRoutePolicy(
+                rel, module_map.get(path, os.path.abspath(root)), match.start(),
+                text.count("\n", 0, match.start()) + 1,
+                "/**", match.group("decision"), "ANY"))
+    return policies
+
+
+def _coverage_policy_for_route(
+        policies: Sequence[CoverageRoutePolicy], route: str,
+        http_method: str = "ANY", module: str = "") -> Tuple[str, List[str]]:
+    """Resolve the first matching authorization rule per configuration file."""
+    by_file: Dict[str, List[CoverageRoutePolicy]] = {}
+    for policy in policies:
+        if module and policy.module != module:
+            continue
+        by_file.setdefault(policy.file, []).append(policy)
+    matches: List[CoverageRoutePolicy] = []
+    for file_policies in by_file.values():
+        for policy in sorted(file_policies, key=lambda item: item.position):
+            if (policy.http_method in {"ANY", http_method} and
+                    _coverage_pattern_matches(policy.pattern, route)):
+                matches.append(policy)
+                break
+    if not matches:
+        return "unknown", ["No statically resolvable SecurityFilterChain rule matched the route"]
+    # A route-specific matcher is more informative than unrelated catch-all
+    # policies from other filter-chain configurations/modules.
+    def specificity(policy: CoverageRoutePolicy) -> int:
+        literal = re.sub(r"\{[^}]+\}|\*+", "", policy.pattern)
+        return len(literal.strip("/"))
+    best = max(specificity(policy) for policy in matches)
+    matches = [policy for policy in matches if specificity(policy) == best]
+    decisions = {policy.decision.lower() for policy in matches}
+    evidence = [f"{policy.http_method} {policy.pattern}.{policy.decision}() at "
+                f"{policy.file}:{policy.line}"
+                for policy in matches]
+    if len(decisions) > 1:
+        return "unknown", ["Conflicting route policies: " + "; ".join(evidence)]
+    return next(iter(decisions)), evidence
+
+
+def _coverage_method_key(method: ProjectMethodSummary) -> str:
+    return f"{method.rel}:{method.class_name}.{method.name}:{method.line}"
+
+
+def _coverage_method_label(method: ProjectMethodSummary) -> str:
+    return f"{method.class_name}.{method.name}()"
+
+
+def _coverage_reachable_methods(
+        entry: ProjectMethodSummary, methods: Sequence[ProjectMethodSummary],
+        module_map: Optional[Dict[str, str]] = None) -> Dict[str, Tuple[ProjectMethodSummary, List[str]]]:
+    """Build a bounded, conservative name-based project call graph."""
+    by_name: Dict[str, List[ProjectMethodSummary]] = {}
+    entry_module = module_map.get(entry.path, "") if module_map else ""
+    for method in methods:
+        if module_map and module_map.get(method.path, "") != entry_module:
+            continue
+        by_name.setdefault(method.name, []).append(method)
+    reached: Dict[str, Tuple[ProjectMethodSummary, List[str]]] = {}
+    queue: List[Tuple[ProjectMethodSummary, List[str], int]] = [
+        (entry, [_coverage_method_label(entry)], 0)]
+    while queue and len(reached) < 250:
+        method, path, depth = queue.pop(0)
+        key = _coverage_method_key(method)
+        if key in reached:
+            continue
+        reached[key] = (method, path)
+        if depth >= 8:
+            continue
+        called: List[Tuple[str, str]] = []
+        masked = _structure_mask(method.body)
+        for call in re.finditer(
+                r"\b(?:(?P<receiver>[A-Za-z_$][\w$]*)\s*\.\s*)?"
+                r"(?P<name>[A-Za-z_$][\w$]*)\s*\(", masked):
+            receiver, name = call.group("receiver") or "", call.group("name")
+            item = (receiver, name)
+            if name in by_name and item not in called:
+                called.append(item)
+        for receiver, name in called:
+            candidates = by_name[name]
+            if receiver:
+                normalized_receiver = re.sub(r"[^a-z0-9]", "", receiver.lower())
+                receiver_matches = [candidate for candidate in candidates
+                                    if (lambda class_name: class_name == normalized_receiver or
+                                        class_name.startswith(normalized_receiver) or
+                                        normalized_receiver.startswith(class_name))(
+                                            re.sub(r"[^a-z0-9]", "", candidate.class_name.lower()))]
+                if receiver_matches:
+                    candidates = receiver_matches
+            else:
+                local_matches = [candidate for candidate in candidates
+                                 if candidate.class_name == method.class_name]
+                if local_matches:
+                    candidates = local_matches
+            # Prefer a unique project method. If several overloads/classes match,
+            # traverse all of them and let UNKNOWN evidence expose ambiguity.
+            for callee in candidates[:12]:
+                if _coverage_method_key(callee) == key:
+                    continue
+                queue.append((callee, path + [_coverage_method_label(callee)], depth + 1))
+    return reached
+
+
+def _coverage_entry_methods(
+        methods: Sequence[ProjectMethodSummary],
+        loaded: Dict[str, Tuple[List[str], List[Method]]]) -> List[Tuple[ProjectMethodSummary, str, str, str]]:
+    """Return (method, kind, HTTP method, route/consumer label) entry points."""
+    entries: List[Tuple[ProjectMethodSummary, str, str, str]] = []
+    for method in methods:
+        text = "\n".join(loaded[method.path][0])
+        prefix = _coverage_class_prefix(text, method)
+        for mapping in _COVERAGE_MAPPING.finditer(method.header):
+            annotation, arguments = mapping.group(1), mapping.group(2) or ""
+            for http_method in _coverage_http_methods(annotation, arguments):
+                for route in _coverage_annotation_paths(arguments):
+                    entries.append((method, "HTTP", http_method,
+                                    _coverage_join_route(prefix, route)))
+        for listener in _COVERAGE_CONSUMER.finditer(method.header):
+            values = re.findall(r"[\x22\x27]([^\x22\x27]+)[\x22\x27]",
+                                listener.group(2) or "")
+            destination = values[0] if values else "<dynamic destination>"
+            entries.append((method, listener.group(1), "", destination))
+        if _COVERAGE_SCHEDULED.search(method.header):
+            schedule = _COVERAGE_SCHEDULED.search(method.header)
+            entries.append((method, "Scheduled", "", (schedule.group(1) or "<dynamic schedule>").strip()))
+    return entries
+
+
+def _coverage_finding(
+        entry: CoverageEntry, method: ProjectMethodSummary, rid: str, severity: str,
+        note: str, raw_map: Dict[str, List[str]], context_radius: int) -> Finding:
+    raw_lines = raw_map.get(method.path, [])
+    code = raw_lines[method.line - 1].strip() if 1 <= method.line <= len(raw_lines) else method.header.strip()[:200]
+    return Finding(
+        file=method.rel, line=method.line, rule_id=rid,
+        rule_name=RULE_BY_ID[rid].name, severity=severity, status="COVERAGE",
+        code=code, method=method.name, note=note, fix=RULE_BY_ID[rid].fix,
+        flow=entry.flow, fingerprint=fingerprint(method.rel, rid, entry.entrypoint + code),
+        context=context_lines(raw_lines, method.line, context_radius))
+
+
+def analyze_security_coverage(
+        loaded: Dict[str, Tuple[List[str], List[Method]]], raw_map: Dict[str, List[str]],
+        root: str, context_radius: int = CONTEXT_RADIUS,
+        enabled: Optional[Set[str]] = None,
+        build_files: Sequence[str] = ()) -> Tuple[List[CoverageEntry], List[Finding]]:
+    """Build a control matrix and emit findings for uncovered processing paths."""
+    coverage_rule_ids = {
+        "SECURITY-CONTROL-COVERAGE-GAP", "AUTHZ-SENSITIVE-SINK-UNCOVERED",
+        "AUTHZ-PARTIALLY-PROTECTED-SERVICE", "TENANT-CONTEXT-LOST",
+        "VALIDATION-COVERAGE-GAP", "RATE-LIMIT-COVERAGE-GAP", "AUDIT-COVERAGE-GAP"}
+    allowed = coverage_rule_ids if enabled is None else coverage_rule_ids & enabled
+    methods = _project_method_summaries(loaded, root)
+    module_map = _coverage_module_map(loaded, root, build_files)
+    policies = _coverage_route_policies(loaded, root, module_map)
+    method_security_by_module: Dict[str, bool] = {}
+    for path, (lines, _) in loaded.items():
+        module = module_map.get(path, os.path.abspath(root))
+        method_security_by_module[module] = (
+            method_security_by_module.get(module, False) or
+            bool(_METHOD_SECURITY_ENABLE.search("\n".join(lines))))
+    entries: List[CoverageEntry] = []
+    findings: List[Finding] = []
+    reached_by_entry: Dict[str, Set[str]] = {}
+
+    for entry_method, kind, http_method, target in _coverage_entry_methods(methods, loaded):
+        entry_module = module_map.get(entry_method.path, os.path.abspath(root))
+        reached = _coverage_reachable_methods(entry_method, methods, module_map)
+        reached_by_entry_key = f"{_coverage_method_key(entry_method)}|{kind}|{http_method}|{target}"
+        reached_by_entry[reached_by_entry_key] = set(reached)
+        scopes = [method.header + "\n" + method.body for method, _ in reached.values()]
+        combined = "\n".join(scopes)
+        sink_items: List[Tuple[ProjectMethodSummary, str, List[str]]] = []
+        for method, path in reached.values():
+            for sink in _COVERAGE_SENSITIVE_SINK.finditer(method.body):
+                sink_name = (sink.group(2) or sink.group(3) or "sensitive operation") + "()"
+                sink_items.append((method, sink_name, path))
+        sink_methods = {
+            _coverage_method_key(method): method for method, _, _ in sink_items}
+        sink_scopes = [method.header + "\n" + method.body
+                       for method in sink_methods.values()]
+        sensitive = bool(sink_items)
+        mutating = (http_method in {"POST", "PUT", "PATCH", "DELETE"} or
+                    bool(_COVERAGE_MUTATING_SINK.search(combined)))
+        entry_scope = entry_method.header + "\n" + entry_method.body
+        def active_method_authz(scope: str) -> bool:
+            return bool(
+                _COVERAGE_PROGRAMMATIC_AUTHZ.search(_structure_mask(scope)) or
+                (_COVERAGE_METHOD_AUTHZ_ANNOTATION.search(scope) and
+                 method_security_by_module.get(entry_module, False)))
+        has_method_authz = (active_method_authz(entry_scope) or
+                            bool(sink_scopes and all(active_method_authz(scope)
+                                                     for scope in sink_scopes)))
+        has_authn = bool(
+            _COVERAGE_AUTHN.search(entry_scope) or
+            (sink_scopes and all(_COVERAGE_AUTHN.search(scope) for scope in sink_scopes)))
+        permit_all = bool(re.search(r"@PermitAll\b", entry_scope))
+
+        policy, policy_evidence = ("not_required", ["Non-HTTP entry point"])
+        if kind == "HTTP":
+            policy, policy_evidence = _coverage_policy_for_route(
+                policies, target, http_method, entry_module)
+
+        controls: Dict[str, str] = {}
+        evidence: Dict[str, List[str]] = {}
+        if kind == "Scheduled":
+            controls["authentication"] = "NOT_REQUIRED"
+            evidence["authentication"] = ["Scheduled jobs have no interactive caller"]
+        elif not sensitive:
+            controls["authentication"] = "NOT_REQUIRED"
+            evidence["authentication"] = ["No authentication-sensitive sink was identified"]
+        elif has_authn or has_method_authz:
+            controls["authentication"] = "COVERED"
+            evidence["authentication"] = ["Principal/authentication or method-security evidence is present"]
+        elif kind != "HTTP":
+            controls["authentication"] = "UNKNOWN"
+            evidence["authentication"] = ["Broker authentication is external to the scanned source"]
+        elif policy == "denyall":
+            controls["authentication"] = "NOT_REQUIRED"
+            evidence["authentication"] = policy_evidence + ["The route is denied before processing"]
+        elif policy in {"permitall", "anonymous"} or permit_all:
+            controls["authentication"] = "MISSING" if sensitive else "NOT_REQUIRED"
+            evidence["authentication"] = policy_evidence
+        elif policy in {"authenticated", "fullyauthenticated", "rememberme",
+                        "hasrole", "hasanyrole", "hasauthority",
+                        "hasanyauthority", "access"}:
+            controls["authentication"] = "COVERED"
+            evidence["authentication"] = policy_evidence
+        else:
+            controls["authentication"] = "UNKNOWN"
+            evidence["authentication"] = policy_evidence
+
+        if not sensitive or kind == "Scheduled":
+            controls["authorization"] = "NOT_REQUIRED"
+            evidence["authorization"] = ["No authorization-sensitive sink was identified"]
+        elif policy == "denyall":
+            controls["authorization"] = "COVERED"
+            evidence["authorization"] = policy_evidence + ["The route is explicitly denied"]
+        elif has_method_authz:
+            controls["authorization"] = "COVERED"
+            evidence["authorization"] = ["Method-level authorization is present on the reachable path"]
+        elif policy in {"hasrole", "hasanyrole", "hasauthority", "hasanyauthority", "access"}:
+            controls["authorization"] = "COVERED"
+            evidence["authorization"] = policy_evidence
+        elif policy == "unknown":
+            controls["authorization"] = "UNKNOWN"
+            evidence["authorization"] = policy_evidence
+        else:
+            controls["authorization"] = "MISSING"
+            evidence["authorization"] = policy_evidence + ["Sensitive sink requires an explicit authorization decision"]
+
+        tenant_required = bool(_TENANT_NAME.search(target) or
+                               re.search(r"\b(?:tenant|organization|workspace|realm)(?:Id|ID|_id)?\b",
+                                         entry_scope, re.I))
+        if not tenant_required:
+            controls["tenant"] = "NOT_REQUIRED"
+            evidence["tenant"] = ["No tenant-scoped input was identified"]
+        elif (_COVERAGE_TENANT_BINDING.search(entry_scope) or
+              (sink_scopes and all(_COVERAGE_TENANT_BINDING.search(scope)
+                                   for scope in sink_scopes))):
+            controls["tenant"] = "COVERED"
+            evidence["tenant"] = ["Authenticated tenant/owner binding is visible on the path"]
+        else:
+            controls["tenant"] = "MISSING"
+            evidence["tenant"] = ["Tenant-scoped input has no authenticated-tenant binding"]
+
+        validation_required = bool(re.search(r"@RequestBody\b", entry_scope) or
+                                   kind in {"KafkaListener", "RabbitListener", "JmsListener"})
+        if not validation_required:
+            controls["validation"] = "NOT_REQUIRED"
+            evidence["validation"] = ["No structured request/message payload was identified"]
+        elif (_COVERAGE_VALIDATION.search(entry_scope) or
+              (sink_scopes and all(_COVERAGE_VALIDATION.search(scope)
+                                   for scope in sink_scopes))):
+            controls["validation"] = "COVERED"
+            evidence["validation"] = ["Bean or programmatic validation is visible on the path"]
+        else:
+            controls["validation"] = "MISSING"
+            evidence["validation"] = ["External payload reaches processing without visible validation"]
+
+        abuse_sensitive = bool(_COVERAGE_ABUSE_ROUTE.search(target + " " + entry_method.name))
+        if not abuse_sensitive:
+            controls["rate_limit"] = "NOT_REQUIRED"
+            evidence["rate_limit"] = ["Entry point is not classified as authentication/token abuse-sensitive"]
+        elif (_COVERAGE_RATE_LIMIT.search(entry_scope) or
+              (sink_scopes and all(_COVERAGE_RATE_LIMIT.search(scope)
+                                   for scope in sink_scopes))):
+            controls["rate_limit"] = "COVERED"
+            evidence["rate_limit"] = ["Rate-limit, throttling, or lockout evidence is present"]
+        else:
+            controls["rate_limit"] = "MISSING"
+            evidence["rate_limit"] = ["Abuse-sensitive entry point has no visible throttling or lockout"]
+
+        audit_required = sensitive and mutating
+        if not audit_required:
+            controls["audit"] = "NOT_REQUIRED"
+            evidence["audit"] = ["No sensitive state change was identified"]
+        elif (_COVERAGE_AUDIT.search(entry_scope) or
+              (sink_scopes and all(_COVERAGE_AUDIT.search(scope)
+                                   for scope in sink_scopes))):
+            controls["audit"] = "COVERED"
+            evidence["audit"] = ["Structured security audit evidence is present"]
+        else:
+            controls["audit"] = "MISSING"
+            evidence["audit"] = ["Sensitive state change has no visible structured audit event"]
+
+        if sink_items:
+            terminal_method, _, terminal_path = max(sink_items, key=lambda item: len(item[2]))
+            flow = terminal_path
+        else:
+            terminal_method = entry_method
+            flow = [_coverage_method_label(entry_method)]
+        entrypoint = (f"{http_method} {target}" if kind == "HTTP"
+                      else f"{kind} {target}")
+        coverage = CoverageEntry(
+            entrypoint=entrypoint, kind=kind, file=entry_method.rel,
+            line=entry_method.line, method=entry_method.name,
+            http_method=http_method, route=target if kind == "HTTP" else "",
+            controls=controls, evidence=evidence, flow=flow,
+            sensitive_sinks=sorted({item[1] for item in sink_items}))
+        entries.append(coverage)
+
+        missing_map = {
+            "authorization": ("AUTHZ-SENSITIVE-SINK-UNCOVERED", "HIGH"),
+            "tenant": ("TENANT-CONTEXT-LOST", "HIGH"),
+            "validation": ("VALIDATION-COVERAGE-GAP", "MEDIUM"),
+            "rate_limit": ("RATE-LIMIT-COVERAGE-GAP", "HIGH"),
+            "audit": ("AUDIT-COVERAGE-GAP", "MEDIUM"),
+        }
+        for control, (rid, severity) in missing_map.items():
+            if controls.get(control) != "MISSING" or rid not in allowed:
+                continue
+            note = (f"{entrypoint} has missing {control.replace('_', ' ')} coverage. "
+                    f"Path: {' -> '.join(flow)}. " + " ".join(evidence[control]))
+            findings.append(_coverage_finding(
+                coverage, terminal_method, rid, severity, note, raw_map, context_radius))
+        unresolved = [name for name, status in controls.items() if status == "UNKNOWN"]
+        if controls.get("authentication") == "MISSING":
+            unresolved.insert(0, "authentication (missing)")
+        if unresolved and "SECURITY-CONTROL-COVERAGE-GAP" in allowed:
+            note = (f"{entrypoint} has unresolved control coverage: {', '.join(unresolved)}. "
+                    f"Path: {' -> '.join(flow)}.")
+            findings.append(_coverage_finding(
+                coverage, entry_method, "SECURITY-CONTROL-COVERAGE-GAP",
+                "HIGH" if controls.get("authentication") == "MISSING" else "MEDIUM",
+                note, raw_map, context_radius))
+
+    # A service protected only by some callers is a fragile trust boundary.
+    authz_by_method: Dict[str, List[Tuple[CoverageEntry, str]]] = {}
+    entry_lookup = {
+        f"{_coverage_method_key(method)}|{kind}|{http_method}|{target}": coverage
+        for (method, kind, http_method, target), coverage in zip(
+            _coverage_entry_methods(methods, loaded), entries)}
+    entry_method_keys = {
+        _coverage_method_key(method)
+        for method, _, _, _ in _coverage_entry_methods(methods, loaded)}
+    for key, reached_keys in reached_by_entry.items():
+        coverage = entry_lookup.get(key)
+        if not coverage:
+            continue
+        for method_key in reached_keys:
+            authz_by_method.setdefault(method_key, []).append(
+                (coverage, coverage.controls.get("authorization", "UNKNOWN")))
+    method_lookup = {_coverage_method_key(method): method for method in methods}
+    if "AUTHZ-PARTIALLY-PROTECTED-SERVICE" in allowed:
+        for method_key, callers in authz_by_method.items():
+            states = {state for _, state in callers}
+            if "COVERED" not in states or "MISSING" not in states:
+                continue
+            method = method_lookup[method_key]
+            if method_key in entry_method_keys:
+                continue
+            affected = sorted({coverage.entrypoint for coverage, _ in callers})
+            exemplar = next(coverage for coverage, state in callers if state == "MISSING")
+            note = (f"{_coverage_method_label(method)} is reached from both authorized and "
+                    f"unauthorized entry points: {', '.join(affected)}.")
+            findings.append(_coverage_finding(
+                exemplar, method, "AUTHZ-PARTIALLY-PROTECTED-SERVICE", "HIGH",
+                note, raw_map, context_radius))
+
+    return sorted(entries, key=lambda item: (item.kind, item.entrypoint, item.file, item.line)), findings
+
+
+_METHOD_SECURITY_ENABLE = re.compile(
+    r"@EnableMethodSecurity\b|@EnableGlobalMethodSecurity\s*\([^)]*prePostEnabled\s*=\s*true",
+    re.I)
+_PREPOST_ANNOTATION = re.compile(r"@(?:PreAuthorize|PostAuthorize)\b", re.I)
+
+
+def analyze_preauthorize_without_method_security(
+        loaded: Dict[str, Tuple[List[str], List[Method]]], raw_map: Dict[str, List[str]],
+        root: str, build_files: Sequence[str],
+        context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
+    """Correlate method-security annotations with module-level enablement."""
+    out: List[Finding] = []
+    for files in _group_loaded_by_module(loaded, root, build_files).values():
+        if any(_METHOD_SECURITY_ENABLE.search(source) for _, source in files):
+            continue
+        for path, source in files:
+            for match in _PREPOST_ANNOTATION.finditer(source):
+                line = source.count("\n", 0, match.start()) + 1
+                rel = os.path.relpath(path, root) if root else path
+                raw_lines = raw_map.get(path, source.splitlines())
+                code = raw_lines[line - 1].strip() if 1 <= line <= len(raw_lines) else match.group(0)
+                finding = Finding(
+                    file=rel, line=line,
+                    rule_id="AUTHZ-PREAUTHORIZE-WITHOUT-METHODSECURITY",
+                    rule_name=RULE_BY_ID["AUTHZ-PREAUTHORIZE-WITHOUT-METHODSECURITY"].name,
+                    severity="HIGH", status="ANTIPATTERN", code=code,
+                    note="Method authorization annotation found, but neither @EnableMethodSecurity "
+                         "nor legacy prePostEnabled=true is present in this module; the annotation may be ignored.",
+                    fix=FIX_METHOD_SEC,
+                    fingerprint=fingerprint(rel, "AUTHZ-PREAUTHORIZE-WITHOUT-METHODSECURITY", code),
+                    context=context_lines(raw_lines, line, context_radius))
+                if not finding_suppressed(raw_lines, finding):
+                    out.append(finding)
+    return out
+
+
+_LOGOUT_ENTRY = re.compile(
+    r"\.logout\s*\(|@(?:Post|Delete)Mapping\s*\([^)]*[\x22\x27][^\x22\x27]*logout|"
+    r"\b(?:logout|signOut)\s*\([^;{]*\)\s*(?:throws[^\{]*)?\{", re.I)
+_REFRESH_REVOKE = re.compile(
+    r"(?:refreshToken\w*|refreshTokens?|tokenFamily)[^;\n]{0,120}"
+    r"\.(?:delete|deleteAll|revoke|invalidate|blacklist|remove)\s*\(|"
+    r"(?:delete|revoke|invalidate|blacklist|remove)[^;\n]{0,100}refresh", re.I)
+
+
+def analyze_refresh_logout_revocation(
+        loaded: Dict[str, Tuple[List[str], List[Method]]], raw_map: Dict[str, List[str]],
+        root: str, build_files: Sequence[str],
+        context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
+    """Find modules with refresh tokens and logout but no visible revocation."""
+    out: List[Finding] = []
+    for files in _group_loaded_by_module(loaded, root, build_files).values():
+        combined = "\n".join(source for _, source in files)
+        if not _REFRESH_FLOW.search(combined) or _REFRESH_REVOKE.search(combined):
+            continue
+        for path, source in files:
+            match = _LOGOUT_ENTRY.search(source)
+            if not match:
+                continue
+            line = source.count("\n", 0, match.start()) + 1
+            rel = os.path.relpath(path, root) if root else path
+            raw_lines = raw_map.get(path, source.splitlines())
+            code = raw_lines[line - 1].strip() if 1 <= line <= len(raw_lines) else match.group(0)
+            finding = Finding(
+                file=rel, line=line, rule_id="REFRESH-TOKEN-NO-REVOKE-ON-LOGOUT",
+                rule_name=RULE_BY_ID["REFRESH-TOKEN-NO-REVOKE-ON-LOGOUT"].name,
+                severity="HIGH", status="REVIEW", code=code,
+                note="This module handles refresh tokens and logout, but no refresh-token "
+                     "delete/revoke/invalidate operation is visible.",
+                fix=FIX_REFRESH_LIFECYCLE,
+                fingerprint=fingerprint(rel, "REFRESH-TOKEN-NO-REVOKE-ON-LOGOUT", code),
+                context=context_lines(raw_lines, line, context_radius))
+            if not finding_suppressed(raw_lines, finding):
+                out.append(finding)
+            break
+    return out
+
+
+_CSRF_DISABLED_RE = re.compile(
+    r"\.csrf\s*\(\s*\)\s*\.\s*disable\s*\(\s*\)|"
+    r"\.csrf\s*\(\s*(?:(?:c|csrf)\s*->\s*(?:c|csrf)\s*\.\s*disable\s*\(\s*\)|"
+    r"AbstractHttpConfigurer\s*::\s*disable)\s*\)", re.I)
+_JWT_COOKIE_RE = re.compile(
+    r"@CookieValue\s*\([^)]*(?:jwt|access[_-]?token|auth[_-]?token|bearer|refresh[_-]?token)|"
+    r"@CookieValue\b[^;\n]{0,160}\b(?:jwt|accessToken|authToken|refreshToken)\b|"
+    r"(?:new\s+Cookie|ResponseCookie\s*\.\s*from|\.getCookie)\s*\(\s*"
+    r"[\x22\x27](?:jwt|access[_-]?token|auth[_-]?token|bearer|refresh[_-]?token)[\x22\x27]|"
+    r"getCookies\s*\(\s*\)[\s\S]{0,500}?\b(?:jwt|accessToken|authToken|refreshToken)\b",
+    re.I)
+
+
+def analyze_csrf_disabled_jwt_cookie(loaded: Dict[str, Tuple[List[str], List[Method]]],
+                                     raw_map: Dict[str, List[str]], root: str,
+                                     build_files: Sequence[str],
+                                     context_radius: int = CONTEXT_RADIUS) -> List[Finding]:
+    """Correlate JWT auth cookies and disabled CSRF within the same build module."""
+    module_dirs = sorted({os.path.abspath(os.path.dirname(path)) for path in build_files},
+                         key=len, reverse=True)
+
+    def module_for(path: str) -> str:
+        absolute = os.path.abspath(path)
+        for directory in module_dirs:
+            try:
+                if os.path.commonpath((absolute, directory)) == directory:
+                    return directory
+            except ValueError:
+                pass
+        return os.path.abspath(root)
+
+    grouped: Dict[str, List[Tuple[str, str]]] = {}
+    for path, (lines, _) in loaded.items():
+        grouped.setdefault(module_for(path), []).append((path, "\n".join(lines)))
+
+    out: List[Finding] = []
+    for files in grouped.values():
+        cookie_evidence: Optional[Tuple[str, int]] = None
+        for path, source in files:
+            match = _JWT_COOKIE_RE.search(source)
+            if match:
+                cookie_evidence = (path, source.count("\n", 0, match.start()) + 1)
+                break
+        if not cookie_evidence:
+            continue
+        cookie_path, cookie_line = cookie_evidence
+        cookie_rel = os.path.relpath(cookie_path, root) if root else cookie_path
+        for path, source in files:
+            for match in _CSRF_DISABLED_RE.finditer(source):
+                line = source.count("\n", 0, match.start()) + 1
+                rel = os.path.relpath(path, root) if root else path
+                raw_lines = raw_map.get(path, source.splitlines())
+                code = raw_lines[line - 1].strip() if 1 <= line <= len(raw_lines) else match.group(0)
+                flow = [f"JWT auth cookie ({cookie_rel}:{cookie_line})", "CSRF disabled"]
+                finding = Finding(
+                    file=rel, line=line,
+                    rule_id="SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE",
+                    rule_name=RULE_BY_ID["SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE"].name,
+                    severity="CRITICAL", status="ANTIPATTERN", code=code,
+                    note="JWT authentication appears to use a cookie in the same module while "
+                         "CSRF is disabled. Browsers attach the cookie automatically, so a "
+                         "cross-site request can execute authenticated actions.",
+                    fix=FIX_CSRF_JWT_COOKIE, flow=flow,
+                    fingerprint=fingerprint(rel, "SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE", code),
+                    context=context_lines(raw_lines, line, context_radius))
+                if not finding_suppressed(raw_lines, finding):
+                    out.append(finding)
+    return out
+
+
 def dedupe_findings(findings: Sequence[Finding]) -> List[Finding]:
     """Collapse overlapping heuristic/structured findings at the same sink."""
     by_sink: Dict[Tuple[str, int, str], Finding] = {}
@@ -5424,6 +9584,45 @@ _RULE_LITERAL_HINTS = {'ANTI-ACCESS-ALL': ('ACCESS_EXTERNAL_',),
  'SpringSecurityCheck-HTTP-BASIC-PROD': ('httpBasic',),
  'SpringSecurityCheck-IGNORE-REQUEST-MATCHER': ('ignoring',),
  'SpringSecurityCheck-INMEMORY-USERS': ('InMemoryUserDetailsManager', 'withDefaultPasswordEncoder'),
+ 'JWT-PARSE-NO-VERIFY': ('Jwts', 'parserBuilder', 'parser', 'parse'),
+ 'SRC-CRYPTO-RSA-NO-OAEP': ('Cipher', 'RSA'),
+ 'SRC-CRYPTO-STATIC-IV': ('GCMParameterSpec', 'IvParameterSpec'),
+ 'SRC-RANDOM-PREDICTABLE-SEED': ('SecureRandom', 'setSeed'),
+ 'SRC-SSTI-VIEW-NAME': ('redirect:', 'forward:', 'return'),
+ 'SpringSecurityCheck-PREAUTH-ON-INTERFACE': ('@PreAuthorize', '@PostAuthorize', '@Secured'),
+ 'SpringSecurityCheck-REGEX-NO-DOTALL': ('RegexRequestMatcher',),
+ 'HARDEN-CRYPTO-GCM-RANDOM-IV': ('SecureRandom', 'nextBytes', 'GCMParameterSpec'),
+ 'HARDEN-RSA-OAEP': ('Cipher', 'RSA', 'OAEP'),
+ 'JWT-AUDIENCE-VALIDATION': ('Jwts', 'parserBuilder', 'parser'),
+ 'JWT-CLOCK-SKEW': ('JwtTimestampValidator', 'ClockSkew', 'allowedClockSkew'),
+ 'JWT-REFRESH-TOKEN-REUSE': ('refreshToken', 'localStorage'),
+ 'JWT-SENSITIVE-CLAIMS': ('claim',),
+ 'HARDEN-JWT-AUDIENCE-VALIDATION': ('requireAudience', 'JwtClaimValidator'),
+ 'HARDEN-JWT-CLOCK-SKEW': ('JwtTimestampValidator',),
+ 'HARDEN-OAUTH2-PKCE-ENABLED': ('PkceParameterNames', 'requireProofKey', 'codeChallenge'),
+ 'HARDEN-OAUTH2-STATE-PARAM': ('state', 'UUID', 'random'),
+ 'OAUTH2-INTROSPECTION-HTTP': ('introspectionUri', 'introspection-uri'),
+ 'OAUTH2-PKCE-PLAIN': ('code_challenge_method', 'codeChallengeMethod', 'CodeChallengeMethod', 'PkceMethod'),
+ 'OAUTH2-REDIRECT-PREFIX-MATCH': ('redirect', 'callback', 'returnUrl'),
+ 'OAUTH2-TOKEN-QUERY-PARAM': ('access_token', 'ACCESS_TOKEN'),
+ 'OAUTH2-CLIENT-SECRET-URL': ('client_secret', 'CLIENT_SECRET'),
+ 'OAUTH2-SCOPE-HARDCODED': ('scopes', 'scope'),
+ 'OAUTH2-STATE-MISSING': ('OAuth2AuthorizationRequest',),
+ 'OAUTH2-TOKEN-LOGGING': ('log', 'logger', 'LOG', 'LOGGER'),
+ 'OIDC-NONCE-MISSING': ('OidcUserService', 'OidcAuthorizationCodeAuthenticationProvider'),
+ 'JWT-BLANK-SECRET': ('signWith',),
+ 'JWT-JWKS-HTTP': ('withJwkSetUri', 'JWKSet', 'http://'),
+ 'JWE-ZIP-ENABLED': ('setCompressionAlgorithm', 'compressionAlgorithm', 'customParam', 'zip'),
+ 'CERT-PRIVATE-KEY-COMMITTED': ('PRIVATE KEY',),
+ 'JWT-NO-AUDIENCE': ('Jwts',),
+ 'JWT-NO-EXPIRY': ('Jwts',),
+ 'JWT-NO-SUBJECT-VALIDATION': ('Jwts', 'parserBuilder', 'parser'),
+ 'JWT-NULL-SIGNATURE': ('parse', 'ignoreSignature', 'NONE'),
+ 'JWT-WEAK-KEY-SIZE': ('KeyPairGenerator', 'initialize'),
+ 'HARDEN-JWT-EXPIRY-SET': ('expiration', 'setExpiration'),
+ 'HARDEN-JWT-ISSUER-VALIDATION': ('requireIssuer', 'JwtValidators', 'JwtClaimValidator'),
+ 'HARDEN-JWT-SECRET-FROM-ENV': ('@Value', 'getenv', 'getProperty', 'vault'),
+ 'HARDEN-JWT-STRONG-ALG': ('signWith', 'SignatureAlgorithm', 'RS256', 'ES256', 'PS256'),
  'SpringSecurityCheck-JWT-ALG-CONFUSION': ('Jwts',),
  'SpringSecurityCheck-JWT-LONG-EXPIRY': ('expiration',),
  'SpringSecurityCheck-JWT-NO-ISSUER': ('NimbusJwtDecoder', 'Jwts'),
@@ -5442,6 +9641,13 @@ _RULE_LITERAL_HINTS = {'ANTI-ACCESS-ALL': ('ACCESS_EXTERNAL_',),
  'SpringSecurityCheck-SAML-NO-SIGN': ('wantAssertionsSigned', 'authnRequestsSigned'),
  'SpringSecurityCheck-SESSION-FIXATION': ('sessionManagement',),
  'SpringSecurityCheck-SESSION-STATELESS-NO-JWT': ('SessionCreationPolicy',),
+ 'TLS-OLD-PROTOCOL': ('SSLContext', 'setEnabledProtocols', 'setProtocols', 'protocol'),
+ 'TLS-WEAK-CIPHER': ('TLS_', 'SSL_'),
+ 'TLS-TRUST-SELF-SIGNED': ('TrustSelfSignedStrategy', 'loadTrustMaterial'),
+ 'TLS-REVOCATION-DISABLED': ('setRevocationEnabled', 'checkRevocation', 'ocsp.enable'),
+ 'TLS-MTLS-WANT-INSTEAD-OF-NEED': ('setWantClientAuth', 'setNeedClientAuth', 'ClientAuth'),
+ 'TLS-KEYSTORE-PASSWORD-HARDCODED': ('keyStorePassword', 'keystorePassword', 'setKeyStorePassword'),
+ 'TLS-TRUSTSTORE-PASSWORD-HARDCODED': ('trustStorePassword', 'truststorePassword', 'setTrustStorePassword'),
  'WEBFLUX-CSRF-DISABLED': ('csrf',),
  'WEBFLUX-FN-SENSITIVE-ROUTE': ('route',),
  'WEBFLUX-PERMITALL': ('authorizeExchange',),
@@ -6066,3 +10272,5 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(0)
+
+```
