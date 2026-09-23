@@ -1,7 +1,8 @@
+```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-JSpringGuard 3.15 - Static security analysis for JVM projects with offline OSV support.
+JSpringGuard 4.0 - Static security analysis for JVM projects with offline OSV support.
 
 STANDALONE TOOL: this single file is everything you need for its native rules. No Semgrep,
 CodeQL CLI/database, no other scripts, and no third-party Python packages -
@@ -9,142 +10,11 @@ just this file and a Python 3.8+ interpreter. Any mention of "CodeQL" below
 refers to detection techniques that have been ported into this file's own
 Python rules; it does not mean CodeQL needs to be installed or run.
 
-New in 3.0 (Spring Security):
-  * CSRF: disabled, GET-only matchers, missing token checks
-  * authentication: permitAll on sensitive paths, missing authentication, anonymous access
-  * session: stateless without JWT check, no session fixation, no timeout
-  * headers: missing CSP, HSTS, X-Frame-Options, no HTTPS redirect
-  * CORS: wildcard origin with credentials, insecure method exposure
-  * password: insecure encoders (plain, MD5, NoOp), BCrypt without a cost parameter
-  * actuator: endpoints exposed without authentication
-  * remember-me: without a key, token validity too long
-  * logging/audit: no failure handlers, no audit events
-  * dependency check: Spring Security, Spring Boot below known minimum versions
-
-New in 3.1 (merged from the standalone scanners, still zero external tools):
-  * non-XML injection heuristics, weak crypto, build supply-chain hygiene,
-    extra config rules, and the Spring CodeQL detection techniques re-implemented
-    natively in Python (no CodeQL install required to get this coverage)
-
-New in 3.3:
-  * one inventory and cached source shared by all source analyzers
-  * module-local web/security combinations and Data REST dependency review
-  * XSS response/template review and missing request-body validation checks
-  * --list-rules and SARIF helpUri documentation links
-  * --context N in all reports (introduced in 3.2)
-
-New in 3.4:
-  * repeatable --include-rule/--exclude-rule globs (enable/disable aliases)
-  * opt-in effective Maven/Gradle runtime graphs via --resolve-deps
-  * structured method AST and intraprocedural request-to-sink data flow
-  * visible source-to-sink flow paths in text, HTML, Markdown, JSON and SARIF
-  * optional --codeql-sarif import for CodeQL Action/CLI results without bundling CodeQL
-
-New in 3.6:
-  * full-file context display by default (--context 0: matched line only; --context N: ±N lines)
-  * HTML report: scrollable source blocks (max-height 420 px) with auto-scroll to finding line
-
-New in 3.7:
-  * 13 standalone positive-hardening rules (HARDEN-*), independent of any nearby risky
-    construct: BCrypt work factor, Argon2/SCrypt/PBKDF2, SecureRandom, explicit CSP/HSTS,
-    HttpOnly/Secure cookies, @PreAuthorize/@PostAuthorize/@EnableMethodSecurity, CORS pinned
-    to an explicit HTTPS origin, explicit XXE DOCTYPE disallow, literal PreparedStatement
-    queries, Bean Validation constraint annotations, and @Valid/@Validated on @RequestBody DTOs
-  * --show-hardened is now on by default so these (and existing guard-based HARDENED
-    findings) always show; --hide-hardened restores the old terse behavior
-  * Windows CLI fix: a quoted path with a single trailing backslash (misparsed by
-    cmd.exe/PowerShell) now gets a clear error instead of silently scanning nothing
-  * more specific finding messages: matched construct text on sink/antipattern rules,
-    the bare parameter name on SRC-LOG-INJECTION, and the DTO type/parameter/method on
-    SRC-REQUEST-BODY-NO-VALID
-  * HTML report: context line numbers are now padded/aligned like the terminal report
-
-New in 3.8:
-  * local OSV Maven database for offline scanning of Maven and Gradle dependencies
-  * database download/update, local ZIP import, and snapshot metadata
-  * full dependency coordinates, conservative version checks, and explicit unresolved findings
-  * corrected CVE mappings, exact OSV query versions, pagination, and clearer cache reporting
-  * cross-line source detection and conservative XXE hardening checks before first use
-
-New in 3.9:
-  * 7 new JWT vulnerability rules (JWT-* prefix), inspired by jwt_tool attack playbook:
-    JWT-NO-EXPIRY (missing exp claim), JWT-NO-AUDIENCE (missing aud validation),
-    JWT-NO-SUBJECT-VALIDATION (sub never checked), JWT-BLANK-SECRET (empty/trivial secret),
-    JWT-NULL-SIGNATURE (null/empty signature accepted), JWT-WEAK-KEY-SIZE (RSA/EC too small),
-    JWT-JWKS-HTTP (JWKS fetched over plain HTTP)
-  * JWT-KID-INJECTION cross-line check: kid claim value flows into DB/file/command sink
-  * 4 new HARDEN-JWT-* positive rules: HARDEN-JWT-STRONG-ALG (RS/ES/PS variants),
-    HARDEN-JWT-EXPIRY-SET (explicit exp), HARDEN-JWT-ISSUER-VALIDATION (.requireIssuer /
-    JwtValidators.createDefaultWithIssuer), HARDEN-JWT-SECRET-FROM-ENV (secret from
-    @Value / System.getenv / env.getProperty instead of string literal)
-  * New "JWT" category in the HTML report type filter (JWT-* prefix)
-  * All new rules have FAST_REJECT prefilter hints; full selftest suite still passes clean
-
-New in 3.10:
-  * 4 additional JWT rules: JWT-AUDIENCE-VALIDATION (parser ignores aud),
-    JWT-CLOCK-SKEW (clock skew >5 min), JWT-SENSITIVE-CLAIMS (PII/role data in payload),
-    JWT-REFRESH-TOKEN-REUSE (refresh token stored in an insecure location)
-  * JWT-KID-INJECTION extended: 6 more sink types (JNDI, LDAP, SSRF/RestTemplate,
-    MessageDigest, Cipher, DriverManager), Nimbus/Spring JwtHeader source patterns,
-    and a three-pass taint engine (source → passthrough method → sink)
-  * 5 new OAuth2/OIDC checks: OAUTH2-STATE-MISSING (CSRF in auth flow),
-    OAUTH2-TOKEN-LOGGING (Bearer token written to a logger),
-    OAUTH2-INTROSPECTION-HTTP (token introspection over plain HTTP),
-    OAUTH2-SCOPE-HARDCODED (scopes baked into source instead of config),
-    OIDC-NONCE-MISSING (nonce not validated in ID token)
-  * 2 new HARDEN-JWT-* positive rules: HARDEN-JWT-AUDIENCE-VALIDATION,
-    HARDEN-JWT-CLOCK-SKEW (JwtTimestampValidator with explicit skew)
-  * 2 new HARDEN-OAUTH2-* positive rules: HARDEN-OAUTH2-PKCE-ENABLED,
-    HARDEN-OAUTH2-STATE-PARAM
-
-New in 3.11:
-  * 7 new rules derived from CodeQL/Semgrep gap analysis:
-    JWT-PARSE-NO-VERIFY (CWE-347): .parse() used instead of .parseClaimsJws() —
-      signature is silently skipped even when a signing key is set (CodeQL java/missing-jwt-signature-check)
-    SRC-CRYPTO-STATIC-IV (CWE-329): static / hardcoded IV in GCMParameterSpec or IvParameterSpec
-    SRC-CRYPTO-RSA-NO-OAEP (CWE-780): Cipher.getInstance("RSA") or "RSA/ECB/PKCS1Padding" without OAEP
-    SRC-RANDOM-PREDICTABLE-SEED (CWE-330): SecureRandom initialised with a fixed/constant seed
-    SpringSecurityCheck-REGEX-NO-DOTALL: RegexRequestMatcher without CASE_INSENSITIVE flag
-      (auth bypass via newline injection)
-    SpringSecurityCheck-PREAUTH-ON-INTERFACE: @PreAuthorize/@PostAuthorize on an interface
-      method — Spring AOP ignores annotations on interfaces
-    SRC-SSTI-VIEW-NAME (CWE-094): Spring MVC view name returned from a request parameter
-      (open redirect + Server-Side Template Injection)
-  * 2 new HARDEN-* positive rules: HARDEN-CRYPTO-GCM-RANDOM-IV, HARDEN-RSA-OAEP
-  * FAST_REJECT prefilter hints for all 9 new rules; full selftest suite still passes clean    
-    
-New in 3.12:
-  * JWT-JKU-INJECTION and JWT-X5U-INJECTION: method-local taint tracking from
-    attacker-controlled JOSE header URLs into remote key/certificate loading
-  * OAUTH2-PKCE-PLAIN: rejects the downgrade-prone PKCE plain challenge method
-  * SpringSecurityCheck-CSRF-DISABLED-JWT-COOKIE: module-local correlation of
-    disabled CSRF protection with cookie-based JWT authentication
-  * AUTHZ-IDOR-DATAFLOW: @PathVariable identifiers reaching repository ID lookups
-    without visible method/object/tenant authorization evidence
-
-New in 3.13:
-  * embedded JWT key trust checks for attacker-supplied jwk and x5c headers
-  * authorization matcher ordering and inactive @PreAuthorize detection
-  * unsafe OAuth2 redirect comparison, token/secret query parameters, and OIDC/JWT
-    token-purpose validation checks
-  * TLS protocol, cipher, self-signed trust, revocation, optional mTLS, and
-    hardcoded keystore/truststore credential checks
-  * refresh-token rotation and logout-revocation lifecycle checks
-
-New in 3.14:
-  * multiple SecurityFilterChain ordering/fallback analysis and project-wide
-    interprocedural tenant/ID propagation through controller-service-repository calls
-  * OAuth issuer mix-up, nested JWT/JWE, issuer-key binding, token-key separation,
-    DPoP proof validation, and JWE compression checks
-  * committed private-key, empty PKCS12 password, password-reset lifecycle,
-    login throttling, and MFA fail-open checks
-
-New in 3.15:
-  * project-wide security-control coverage for HTTP endpoints, message consumers,
-    and scheduled jobs, with call-path evidence and a coverage matrix
-  * dedicated findings for authorization, tenant, validation, rate-limit, audit,
-    and partially protected service gaps
-  * --coverage and --fail-on-coverage-gap reporting/CI controls
+New in 4.0 (report aligned with the supplied Security Flow Explorer):
+  * interactive source previews, reverse references, control explanations
+  * role/authority matrix, conditional configuration evidence, risk ranking
+  * unresolved call boundaries, policy snapshots/drift, flow/control triage
+  * single offline file; heuristic analysis, not a proof of runtime security
 
 No third-party dependencies. Python 3.8+.
 
@@ -185,7 +55,7 @@ from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-VERSION = "3.15"
+VERSION = "4.0"
 AUTHOR = "NoAuthZone"
 AUTHOR_URL = "https://github.com/NoAuthZone"
 REPO_URL = "https://github.com/NoAuthZone/JSpringGuard"
@@ -1773,6 +1643,20 @@ class CoverageEntry:
     evidence: Dict[str, List[str]] = field(default_factory=dict)
     flow: List[str] = field(default_factory=list)
     sensitive_sinks: List[str] = field(default_factory=list)
+    unresolved_calls: List[str] = field(default_factory=list)
+    semantic_facts: Dict[str, object] = field(default_factory=dict)
+    flow_steps: List[dict] = field(default_factory=list)
+    sinks: List[dict] = field(default_factory=list)
+    route_policy: str = "unknown"
+    policy_evidence: List[str] = field(default_factory=list)
+    reference_flow: bool = False
+    policy_sources: List[dict] = field(default_factory=list)
+    control_sources: Dict[str, List[dict]] = field(default_factory=dict)
+    control_explanations: Dict[str, dict] = field(default_factory=dict)
+    required_permissions: List[str] = field(default_factory=list)
+    activation_conditions: List[str] = field(default_factory=list)
+    policy_conditions: List[str] = field(default_factory=list)
+    configuration_profiles: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -3238,7 +3122,7 @@ def summary_counts(findings: List[Finding]) -> Dict[str, int]:
 _COVERAGE_COLUMNS = (
     ("authentication", "AuthN"), ("authorization", "AuthZ"),
     ("tenant", "Tenant"), ("validation", "Validation"),
-    ("rate_limit", "Rate limit"), ("audit", "Audit"))
+    ("rate_limit", "Rate limit"), ("audit", "Audit"), ("path_resolution", "Path"))
 _COVERAGE_MARK = {
     "COVERED": "OK", "MISSING": "MISSING", "UNKNOWN": "UNKNOWN",
     "NOT_REQUIRED": "N/A"}
@@ -3256,12 +3140,13 @@ def coverage_payload(entries: Sequence[CoverageEntry]) -> dict:
     return {
         "summary": coverage_summary(entries),
         "legend": {
-            "COVERED": "The control is proven on the reachable path.",
+            "COVERED": "Static control evidence is present on the recognized path; runtime enforcement requires review.",
             "MISSING": "A required control is not visible on the reachable path.",
             "UNKNOWN": "Static analysis cannot prove the control because configuration is dynamic or external.",
             "NOT_REQUIRED": "The control is not required for the identified processing path.",
         },
         "entries": [asdict(entry) for entry in entries],
+        "attack_paths": coverage_attack_paths(entries),
     }
 
 
@@ -3352,15 +3237,89 @@ def print_text(findings: List[Finding], scanned: int, builds: int, use_color: bo
     print(f"\nJSpringGuard v{VERSION} by {AUTHOR} - {REPO_URL}")
 
 
-HTML_CSS = """
+HTML_CSS = r"""
+
 .context-hit{display:inline-block;min-width:100%;background:var(--warn-soft);font-weight:bold}
 .source-context{white-space:pre;overflow-x:auto;max-height:420px;overflow-y:auto;border-radius:var(--r-sm)}
-.coverage-wrap{margin:22px 0 28px;padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);overflow-x:auto}
-.coverage-wrap h2{margin:0 0 12px;font-size:17px}.coverage-table{width:100%;border-collapse:collapse;min-width:820px}
+.report-menu{position:sticky;top:61px;z-index:30;display:flex;flex-wrap:wrap;gap:6px;margin:0 -2px 16px;padding:10px 2px;background:var(--bg);border-bottom:1px solid var(--line-soft)}
+.report-menu-link{display:inline-flex;align-items:center;gap:7px;color:var(--dim);text-decoration:none;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-md);padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer}
+.report-menu-link:hover{color:var(--text);background:var(--surface-2)}.report-menu-link.active{color:var(--accent);border-color:var(--accent-soft);background:var(--accent-soft)}
+.report-menu-count{font:700 9.5px var(--mono);border:1px solid currentColor;border-radius:999px;padding:1px 6px;opacity:.8}
+.report-menu-action{margin-left:auto;display:inline-flex;align-items:center;border:1px solid var(--accent-soft);background:var(--accent-soft);color:var(--accent);border-radius:var(--r-md);padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer}.report-menu-action:hover{border-color:var(--accent);color:var(--text)}
+body[data-report-view="findings"] .coverage-wrap{display:none}
+body[data-report-view="flow"] .chips,body[data-report-view="flow"] .filter-row,body[data-report-view="flow"] .triage-bar,body[data-report-view="flow"] .flow-decision-findings,body[data-report-view="flow"] .card,body[data-report-view="flow"] .empty-note{display:none!important}
+.coverage-wrap{margin:22px 0 28px;padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg)}
+.coverage-title{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:14px}
+.coverage-wrap h2{margin:0 0 3px;font-size:17px}.coverage-subtitle{margin:0;color:var(--dim);font-size:12px}
+.coverage-totals{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.coverage-total{font-size:10.5px;font-weight:700;border:1px solid var(--line);border-radius:999px;padding:3px 8px;white-space:nowrap}
+.coverage-attack-section{margin:0 0 12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg);overflow:hidden}
+.coverage-attack-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border-bottom:1px solid var(--line-soft)}
+.coverage-attack-head h3{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.06em}.coverage-attack-head p{margin:2px 0 0;color:var(--faint);font-size:10.5px}
+.coverage-attack-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:10px}
+.coverage-attack{border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:var(--r-sm);background:var(--surface);color:var(--text);padding:9px 10px;text-align:left;cursor:pointer;min-width:0}
+.coverage-attack:hover{border-color:var(--accent)}.coverage-attack.CRITICAL{border-left-color:var(--critical)}.coverage-attack.HIGH{border-left-color:var(--danger)}.coverage-attack.MEDIUM{border-left-color:var(--warn)}
+.coverage-attack-top{display:flex;align-items:center;gap:7px;margin-bottom:5px}.coverage-attack-score{font:800 10px var(--mono);border-radius:999px;padding:2px 6px;background:var(--surface-2)}
+.coverage-attack-label{display:block;font:600 10.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coverage-attack-reason{display:block;color:var(--faint);font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+.coverage-policy-tools{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 12px;padding:9px 11px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-md)}
+.coverage-policy-tools-title{font-size:11px;color:var(--dim);margin-right:auto}.coverage-policy-action{border:1px solid var(--line);background:var(--surface);color:var(--accent);border-radius:var(--r-sm);padding:6px 9px;font-size:10.5px;font-weight:700;cursor:pointer}.coverage-policy-action:hover{border-color:var(--accent)}
+.coverage-drift{display:none;margin:0 0 12px;border:1px solid var(--warn);border-radius:var(--r-md);background:var(--surface);overflow:hidden}.coverage-drift-head{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--line)}.coverage-drift-head h3{margin:0;font-size:12px;color:var(--warn)}.coverage-drift-summary{font:700 9.5px var(--mono);color:var(--warn)}.coverage-drift-list{display:flex;flex-direction:column;gap:7px;padding:10px}.coverage-drift-item{border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:var(--r-sm);padding:8px 10px;background:var(--surface-2)}.coverage-drift-item.degraded,.coverage-drift-item.removed{border-left-color:var(--danger)}.coverage-drift-item.improved,.coverage-drift-item.added{border-left-color:var(--keep)}.coverage-drift-entry{font:700 10.5px var(--mono)}.coverage-drift-change{display:block;color:var(--dim);font-size:10px;margin-top:3px}
+.coverage-permission-section{margin:0 0 12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);overflow:hidden}.coverage-permission-head{padding:10px 12px;border-bottom:1px solid var(--line)}.coverage-permission-head h3{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.06em}.coverage-permission-head p{margin:3px 0 0;color:var(--faint);font-size:10px}.coverage-permission-scroll{overflow:auto;max-height:310px}.coverage-permission-table{width:100%;border-collapse:collapse;min-width:620px}.coverage-permission-table th,.coverage-permission-table td{padding:7px 9px;border-bottom:1px solid var(--line-soft);font-size:10px;text-align:center;white-space:nowrap}.coverage-permission-table th:first-child,.coverage-permission-table td:first-child{text-align:left;position:sticky;left:0;background:var(--surface);z-index:1}.coverage-permission-yes{color:var(--keep);font-weight:800}.coverage-permission-no{color:var(--faint)}.coverage-permission-conditional{color:var(--warn);font-weight:800}
+.flow-triage-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px;padding:9px 11px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-md)}
+.flow-triage-count{font-size:11px;color:var(--dim);margin-right:auto}.flow-triage-count b{color:var(--text)}
+.flow-triage-action{border:1px solid var(--line);background:var(--surface);color:var(--dim);border-radius:var(--r-sm);padding:6px 9px;font-size:10.5px;font-weight:700;cursor:pointer}.flow-triage-action:hover{color:var(--text);border-color:var(--accent)}
+.coverage-dashboard{display:grid;grid-template-columns:minmax(220px,28%) minmax(0,1fr);min-height:560px;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;background:var(--bg)}
+.coverage-sidebar{padding:12px;border-right:1px solid var(--line);background:var(--surface-2)}
+.coverage-search,.coverage-flow-filter{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--text);padding:8px 9px;font-size:12px;margin-bottom:8px}
+.coverage-flow-filter{cursor:pointer}.coverage-filter-label{display:block;color:var(--faint);font-size:9.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;margin:2px 0 5px}
+.coverage-entry-list{display:flex;flex-direction:column;gap:6px;max-height:510px;overflow:auto}
+.coverage-entry{width:100%;border:1px solid transparent;background:transparent;color:var(--text);border-radius:var(--r-sm);padding:9px;text-align:left;cursor:pointer;display:grid;grid-template-columns:8px minmax(0,1fr);gap:8px;transition:background .12s,border-color .12s}
+.coverage-entry:hover{background:var(--surface)}.coverage-entry.active{background:var(--surface);border-color:var(--accent-soft)}
+.coverage-entry-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;background:var(--faint)}
+.coverage-entry-dot.GAP{background:var(--danger)}.coverage-entry-dot.REVIEW{background:var(--warn)}.coverage-entry-dot.COVERED{background:var(--keep)}
+.coverage-entry-name{display:block;font:600 11.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.coverage-entry-loc{display:block;color:var(--faint);font:10px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+.coverage-entry-flow{display:inline-flex;margin-top:5px;border:1px solid var(--line);border-radius:999px;padding:1px 6px;color:var(--faint);font:800 8.5px var(--mono);letter-spacing:.04em}.coverage-entry-flow.HAS_FLOW{color:var(--accent);border-color:var(--accent-soft)}
+.coverage-main{padding:16px;min-width:0}.coverage-overview{display:flex;align-items:flex-start;gap:10px;justify-content:space-between;margin-bottom:12px}
+.coverage-overview h3{margin:0;font:700 14px var(--mono);overflow-wrap:anywhere}.coverage-overview p{margin:4px 0 0;color:var(--faint);font:10.5px var(--mono)}
+.coverage-overview-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.coverage-state{flex:none;font-size:10px;font-weight:800;letter-spacing:.04em;border-radius:999px;padding:4px 9px}
+.coverage-state.GAP{background:var(--danger-soft);color:var(--danger)}.coverage-state.REVIEW{background:var(--warn-soft);color:var(--warn)}.coverage-state.COVERED{background:var(--keep-soft);color:var(--keep)}
+.coverage-panel{border:1px solid var(--line);background:var(--surface);border-radius:var(--r-md);padding:12px;margin-bottom:10px;min-width:0}
+.coverage-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}.coverage-panel-head h4{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin:0}
+.coverage-policy{display:grid;grid-template-columns:minmax(105px,.35fr) minmax(0,1fr);gap:8px 16px;font-size:11.5px}.coverage-policy dt{color:var(--faint)}.coverage-policy dd{margin:0;font-family:var(--mono);overflow-wrap:anywhere}
+.coverage-flow{display:flex;align-items:stretch;gap:8px;overflow-x:auto;padding:3px 2px 9px}
+.coverage-flow-node{flex:0 0 156px;min-height:83px;border:1px solid var(--line);border-top:3px solid var(--accent);border-radius:var(--r-sm);background:var(--surface-2);color:var(--text);padding:9px;text-align:left;cursor:pointer}
+.coverage-flow-node:hover,.coverage-flow-node.active{border-color:var(--accent);background:var(--surface-3)}
+.coverage-flow-node.SINK{border-top-color:var(--danger)}.coverage-flow-node.UNRESOLVED{border-top-color:var(--warn)}
+.coverage-node-kind{display:block;color:var(--faint);font-size:9px;font-weight:800;letter-spacing:.06em;margin-bottom:5px}.coverage-node-label{display:block;font:600 10.5px var(--mono);overflow-wrap:anywhere}.coverage-node-loc{display:block;color:var(--faint);font:9px var(--mono);margin-top:6px;overflow-wrap:anywhere}
+.coverage-arrow{flex:0 0 16px;align-self:center;color:var(--faint);font-size:18px;text-align:center}
+.coverage-code-panel{padding:0;overflow:hidden}.coverage-code-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border-bottom:1px solid var(--line-soft)}
+.coverage-code-title{margin:0;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}.coverage-code-location{font:10px var(--mono);color:var(--accent);overflow-wrap:anywhere;text-align:right}
+.coverage-code-frame{margin:0;border:0;border-radius:0;background:#090b0f;max-height:330px;overflow:auto;padding:8px 0;color:#d8dce5}
+:root[data-theme="light"] .coverage-code-frame{background:#f6f7fa;color:#222733}
+.coverage-code-line{display:grid;grid-template-columns:52px minmax(max-content,1fr);min-width:100%;font:11px/1.55 var(--mono);white-space:pre}.coverage-code-line.hit{background:var(--warn-soft);box-shadow:inset 3px 0 0 var(--warn)}
+.coverage-code-number{color:var(--faint);text-align:right;padding:0 11px 0 6px;border-right:1px solid var(--line-soft);user-select:none}.coverage-code-text{padding:0 12px}.coverage-code-empty{padding:18px;color:var(--faint);font-size:11px}
+.coverage-source-links{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.coverage-source-link{border:1px solid var(--line);background:var(--surface);color:var(--accent);border-radius:999px;padding:3px 8px;font:10px var(--mono);cursor:pointer}.coverage-source-link:hover{border-color:var(--accent)}
+.coverage-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.coverage-control{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2);color:var(--text);padding:8px 9px;text-align:left;cursor:pointer;font-size:11px}.coverage-control:hover,.coverage-control.active{border-color:var(--accent)}
+.coverage-control-status{font:800 9.5px var(--mono)}.coverage-control-status.COVERED{color:var(--keep)}.coverage-control-status.MISSING{color:var(--danger)}.coverage-control-status.UNKNOWN{color:var(--warn)}.coverage-control-status.NOT_REQUIRED{color:var(--faint)}
+.coverage-control-triage{font:800 8px var(--mono);border:1px solid var(--line);border-radius:999px;padding:1px 5px;color:var(--dim)}.coverage-control-triage.false-positive{color:var(--accent);border-color:var(--accent)}.coverage-control-triage.accepted-risk{color:var(--warn);border-color:var(--warn)}.coverage-control-triage.fixed{color:var(--keep);border-color:var(--keep)}.coverage-control-triage.confirmed{color:var(--danger);border-color:var(--danger)}
+.coverage-detail{background:var(--surface-2)}.coverage-detail-title{font-weight:700;font-size:11.5px;margin-bottom:6px}.coverage-detail-list{margin:0;padding-left:17px;color:var(--dim);font-size:11px}.coverage-detail-list li{margin:4px 0;overflow-wrap:anywhere}.coverage-detail-empty{color:var(--faint);font-size:11px}
+.coverage-explanation{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-bottom:10px}.coverage-explanation-card{border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);padding:8px}.coverage-explanation-card.wide{grid-column:1/-1}.coverage-explanation-label{display:block;color:var(--faint);font-size:8.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px}.coverage-explanation-value{color:var(--dim);font-size:10.5px;overflow-wrap:anywhere}.coverage-confidence{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:1px 6px;font:800 8.5px var(--mono)}.coverage-confidence.HIGH{color:var(--keep);border-color:var(--keep)}.coverage-confidence.MEDIUM{color:var(--warn);border-color:var(--warn)}.coverage-confidence.REVIEW{color:var(--danger);border-color:var(--danger)}
+.coverage-control-decision-panel{border-color:var(--accent-soft);box-shadow:inset 4px 0 0 var(--accent)}
+.coverage-flow-triage-panel{border-color:var(--warn);box-shadow:inset 4px 0 0 var(--warn);background:linear-gradient(90deg,var(--warn-soft),var(--surface) 22%);margin-bottom:0}
+.coverage-flow-triage-panel .coverage-panel-head h4{color:var(--warn)}
+.coverage-flow-triage-fields{display:grid;grid-template-columns:minmax(175px,.35fr) minmax(220px,1fr);gap:8px}.coverage-flow-triage-field label{display:block;color:var(--faint);font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;margin:0 0 5px}.coverage-flow-decision,.coverage-flow-note{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--text);padding:8px 9px;font-size:11px}.coverage-flow-decision{cursor:pointer}.coverage-flow-decision:hover,.coverage-flow-note:focus,.coverage-flow-decision:focus{border-color:var(--warn);outline:none}.coverage-flow-decision.confirmed{color:var(--danger);border-color:var(--danger)}.coverage-flow-decision.false-positive{color:var(--accent);border-color:var(--accent)}.coverage-flow-decision.accepted-risk{color:var(--warn);border-color:var(--warn)}.coverage-flow-decision.fixed{color:var(--keep);border-color:var(--keep)}
+.coverage-control-triage-editor{display:grid;grid-template-columns:minmax(145px,.35fr) minmax(180px,1fr);gap:7px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.coverage-control-triage-editor label{grid-column:1/-1;color:var(--faint);font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.coverage-control-triage-editor select,.coverage-control-triage-editor input{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--text);padding:7px 8px;font-size:11px}.coverage-control-triage-editor select{cursor:pointer}
+.coverage-reference-panel{background:var(--surface-2)}.coverage-reference-list{display:flex;flex-direction:column;gap:7px}.coverage-reference-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);padding:8px 9px}.coverage-reference-entry{border:0;background:transparent;color:var(--accent);font:600 10.5px var(--mono);text-align:left;padding:0;cursor:pointer;overflow-wrap:anywhere}.coverage-reference-entry:hover{text-decoration:underline}.coverage-reference-policy{font:800 8.5px var(--mono);color:var(--dim)}.coverage-reference-path{grid-column:1/-1;color:var(--faint);font-size:9.5px;overflow-wrap:anywhere}.coverage-reference-rules{grid-column:1/-1;display:flex;gap:5px;flex-wrap:wrap;margin-top:2px}
+.coverage-matrix{margin-top:12px;border:1px solid var(--line-soft);border-radius:var(--r-sm);overflow:hidden}.coverage-matrix>summary{cursor:pointer;color:var(--dim);font-size:11px;font-weight:600;padding:8px 10px}.coverage-matrix-scroll{overflow-x:auto;border-top:1px solid var(--line-soft)}
+.coverage-table{width:100%;border-collapse:collapse;min-width:820px}
 .coverage-table th,.coverage-table td{padding:8px 10px;border-bottom:1px solid var(--line-soft);text-align:left;font-size:12px}
 .coverage-table th{color:var(--dim);font-weight:600}.coverage-table code{white-space:nowrap}
 .cov-COVERED{color:var(--keep);font-weight:700}.cov-MISSING{color:var(--danger);font-weight:700}
 .cov-UNKNOWN{color:var(--warn);font-weight:700}.cov-NOT_REQUIRED{color:var(--faint)}
+@media (max-width:820px){.coverage-dashboard{grid-template-columns:1fr}.coverage-sidebar{border-right:0;border-bottom:1px solid var(--line)}.coverage-entry-list{max-height:210px}.coverage-controls,.coverage-attack-list,.coverage-flow-triage-fields,.coverage-explanation{grid-template-columns:1fr}.coverage-explanation-card.wide{grid-column:auto}.coverage-title{display:block}.coverage-totals{justify-content:flex-start;margin-top:10px}.coverage-control-triage-editor{grid-template-columns:1fr}}
 
 :root{
 color-scheme:dark;
@@ -3485,6 +3444,19 @@ text-transform:none;letter-spacing:0;font-weight:600}
 padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md)}
 .triage-bar .count{font-size:12px;color:var(--dim);margin-right:auto}
 .triage-bar .count b{color:var(--text)}
+.flow-decision-summary{display:none;align-items:center;gap:7px;flex-wrap:wrap;margin:-8px 0 18px;
+padding:9px 12px;background:var(--surface);border:1px solid var(--accent-soft);border-radius:var(--r-md);box-shadow:inset 4px 0 0 var(--accent)}
+.flow-decision-summary-label{font-size:10.5px;color:var(--dim);margin-right:2px}
+.flow-decision-summary button{border:1px solid var(--line);background:var(--surface-2);color:var(--dim);border-radius:999px;padding:4px 9px;font:700 9.5px var(--mono);cursor:pointer}
+.flow-decision-summary button:hover,.flow-decision-summary button.active{border-color:var(--accent);color:var(--text);background:var(--accent-soft)}
+.flow-decision-summary button.false-positive{color:var(--accent)}
+.flow-decision-summary button.confirmed{color:var(--danger)}
+.flow-decision-summary button.accepted-risk{color:var(--warn)}
+.flow-decision-summary button.fixed{color:var(--keep)}
+.flow-decision-findings{display:none;margin:0 0 18px;padding:12px;background:var(--surface);border:1px solid var(--accent-soft);border-radius:var(--r-md);box-shadow:inset 4px 0 0 var(--accent)}
+.flow-decision-findings-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:9px}.flow-decision-findings-head h2{font-size:12px;margin:0;text-transform:uppercase;letter-spacing:.06em;color:var(--accent)}.flow-decision-findings-head p{margin:2px 0 0;color:var(--faint);font-size:10.5px}.flow-decision-findings-count{font:800 9.5px var(--mono);color:var(--accent);border:1px solid var(--accent-soft);border-radius:999px;padding:2px 7px;white-space:nowrap}
+.flow-decision-findings-list{display:flex;flex-direction:column;gap:7px}.flow-decision-record{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;padding:9px 10px;background:var(--surface-2);border:1px solid var(--line);border-left:4px solid var(--dim);border-radius:var(--r-sm)}.flow-decision-record.false-positive{border-left-color:var(--accent)}.flow-decision-record.accepted-risk{border-left-color:var(--warn)}.flow-decision-record.fixed{border-left-color:var(--keep)}.flow-decision-record.confirmed{border-left-color:var(--danger)}
+.flow-decision-record-title{font:700 11px var(--mono);overflow-wrap:anywhere}.flow-decision-record-status{font:800 9px var(--mono);text-transform:uppercase;color:var(--dim)}.flow-decision-record-status.false-positive{color:var(--accent)}.flow-decision-record-status.accepted-risk{color:var(--warn)}.flow-decision-record-status.fixed{color:var(--keep)}.flow-decision-record-status.confirmed{color:var(--danger)}.flow-decision-record-meta,.flow-decision-record-note{grid-column:1/-1;color:var(--faint);font-size:10px;overflow-wrap:anywhere}.flow-decision-record-note{color:var(--dim)}.flow-decision-record-open{grid-column:1/-1;justify-self:start;border:1px solid var(--accent-soft);background:transparent;color:var(--accent);border-radius:999px;padding:3px 8px;font:700 9.5px var(--mono);cursor:pointer}.flow-decision-record-open:hover{border-color:var(--accent);color:var(--text)}
 .card{background:var(--surface);border:1px solid var(--line);border-left-width:4px;border-radius:var(--r-lg);
 box-shadow:var(--shadow);padding:16px 18px;margin:0 0 14px}
 .card.CRITICAL{border-left-color:var(--critical);box-shadow:var(--shadow),0 0 0 1px var(--critical-soft) inset}
@@ -3529,9 +3501,11 @@ color:var(--faint);text-align:center;line-height:1.7}
 .site-foot a:hover{color:var(--accent);border-color:var(--accent-soft)}
 @media (max-width:640px){.shell{padding:0 14px 80px}.topbar-inner{padding:10px 14px}
 .topbar-meta{display:none}.chips{flex-wrap:wrap}.chips div{min-width:33%}}
+
 """
 
-HTML_JS = """
+HTML_JS = r"""
+
 (function(){
 "use strict";
 var KEY='securityCheckTheme';
@@ -3550,6 +3524,28 @@ if(toggle) toggle.addEventListener('click', function(){
   apply(theme);
   try{ localStorage.setItem(KEY, theme); }catch(e){}
 });
+
+/* ---- Report views ----------------------------------------------------- */
+var reportViewLinks=document.querySelectorAll('[data-report-view-target]');
+function setReportView(view, updateHash){
+  if(view!=='flow') view='findings';
+  document.body.setAttribute('data-report-view',view);
+  reportViewLinks.forEach(function(link){
+    var active=link.getAttribute('data-report-view-target')===view;
+    link.classList.toggle('active',active);
+    link.setAttribute('aria-selected',active?'true':'false');
+  });
+  if(updateHash && window.history && history.replaceState){
+    history.replaceState(null,'',view==='flow'?'#security-flow':'#findings');
+  }
+}
+reportViewLinks.forEach(function(link){
+  link.addEventListener('click',function(event){
+    event.preventDefault();
+    setReportView(link.getAttribute('data-report-view-target'),true);
+  });
+});
+setReportView(location.hash==='#security-flow'?'flow':'findings',false);
 var search=document.getElementById('findingSearch');
 var typeFilter=document.getElementById('typeFilter');
 var sevFilter=document.getElementById('severityFilter');
@@ -3572,8 +3568,10 @@ function applyFilters(){
     c.style.display = hit ? '' : 'none';
     if(hit) shown++;
   });
+  renderFlowDecisionSummary();
+  var flowShown=renderFlowDecisionFindings(st,q,t,s);
   var note=document.getElementById('noMatch');
-  if(note) note.style.display = shown===0 ? '' : 'none';
+  if(note) note.style.display = (shown + flowShown)===0 ? '' : 'none';
   if(chips){
     chips.querySelectorAll('div').forEach(function(d){
       d.classList.toggle('active', d.getAttribute('data-sev') === s && s !== '');
@@ -3599,6 +3597,743 @@ if(toggleFixes) toggleFixes.addEventListener('click', function(){
   toggleFixes.textContent = anyClosed ? 'Collapse all fixes' : 'Expand all fixes';
 });
 
+/* ---- Interactive security-flow explorer ----------------------------- */
+var coverageDataNode=document.getElementById('coverageData');
+var coverageEntries=[];
+var coveragePayload={};
+var coverageAttackPaths=[];
+try{
+  coveragePayload=coverageDataNode ? JSON.parse(coverageDataNode.textContent) : {};
+  coverageEntries=coveragePayload.entries || [];
+  coverageAttackPaths=coveragePayload.attack_paths || [];
+}catch(e){ coveragePayload={}; coverageEntries=[]; coverageAttackPaths=[]; }
+var coverageSelected=0;
+var coverageSelectedControl='';
+var coverageLabels={authentication:'Authentication',authorization:'Authorization',
+  tenant:'Tenant binding',validation:'Input validation',rate_limit:'Rate limiting',
+  audit:'Security audit',path_resolution:'Path resolution',__flow__:'Complete flow'};
+var coverageOrder=['authentication','authorization','tenant','validation',
+                   'rate_limit','audit','path_resolution'];
+var FLOW_TKEY='jspringguardFlowTriage';
+var flowTriage={};
+try{ flowTriage=JSON.parse(localStorage.getItem(FLOW_TKEY) || '{}') || {}; }catch(e){ flowTriage={}; }
+var flowTriageLabels={'confirmed':'Confirmed','false-positive':'False Positive',
+                      'accepted-risk':'Accepted Risk','fixed':'Fixed'};
+
+function coverageElement(tag, className, textValue){
+  var node=document.createElement(tag);
+  if(className) node.className=className;
+  if(textValue!==undefined) node.textContent=String(textValue);
+  return node;
+}
+function coverageClear(node){ while(node && node.firstChild) node.removeChild(node.firstChild); }
+function coverageControlKey(entry,control){
+  var stable=[entry.file || '',entry.entrypoint || '',entry.method || '',control || ''].join('::');
+  var legacy=[entry.file || '',entry.line || 0,entry.entrypoint || '',control || ''].join('::');
+  if(!flowTriage[stable] && flowTriage[legacy]) flowTriage[stable]=flowTriage[legacy];
+  return stable;
+}
+function currentFlowTriageRecords(){
+  var records=[];
+  coverageEntries.forEach(function(entry,index){
+    var controls=['__flow__'];
+    coverageOrder.forEach(function(control){
+      if(Object.prototype.hasOwnProperty.call(entry.controls || {},control)) controls.push(control);
+    });
+    controls.forEach(function(control){
+      var key=coverageControlKey(entry,control);
+      var decision=flowTriage[key] || {};
+      if(decision.status || decision.note){
+        records.push({key:key,entry:entry,entryIndex:index,control:control,decision:decision});
+      }
+    });
+  });
+  return records;
+}
+function renderFlowDecisionSummary(){
+  var host=document.getElementById('flowDecisionSummary');
+  if(!host) return;
+  coverageClear(host);
+  var records=currentFlowTriageRecords();
+  if(!records.length){ host.style.display='none'; return; }
+  host.style.display='flex';
+  host.appendChild(coverageElement('span','flow-decision-summary-label',
+    'Flow/control decisions — quick filter:'));
+  var counts={'false-positive':0,'confirmed':0,'accepted-risk':0,'fixed':0};
+  records.forEach(function(record){
+    var status=(record.decision || {}).status || '';
+    if(Object.prototype.hasOwnProperty.call(counts,status)) counts[status]++;
+  });
+  [['','all','All',records.length],
+   ['false-positive','false-positive','False Positive',counts['false-positive']],
+   ['confirmed','confirmed','Confirmed',counts.confirmed],
+   ['accepted','accepted-risk','Accepted Risk',counts['accepted-risk']],
+   ['fixed','fixed','Fixed',counts.fixed]]
+    .forEach(function(item){
+      var button=coverageElement('button',item[1],item[2] + ' ' + item[3]);
+      button.type='button';
+      button.classList.toggle('active',Boolean(statusFilter) && statusFilter.value===item[0]);
+      button.addEventListener('click',function(){
+        if(statusFilter) statusFilter.value=item[0];
+        if(typeFilter) typeFilter.value='';
+        if(sevFilter) sevFilter.value='';
+        applyFilters();
+      });
+      host.appendChild(button);
+    });
+}
+function flowDecisionStatusMatches(status,filter){
+  if(!filter) return true;
+  if(filter==='__open') return !status;
+  if(filter==='accepted') return status==='accepted-risk';
+  return status===filter;
+}
+function openFlowTriageRecord(record){
+  setReportView('flow',true);
+  renderCoverageEntry(record.entryIndex);
+  var target=null;
+  if(record.control==='__flow__') target=document.querySelector('.coverage-flow-triage-panel');
+  else{
+    var control=document.querySelector('#coverageControls [data-control="' + record.control + '"]');
+    if(control){ control.click(); target=document.getElementById('coverageDetail'); }
+  }
+  if(target) target.scrollIntoView({behavior:'smooth',block:'center'});
+}
+function renderFlowDecisionFindings(statusFilterValue,query,typeValue,severityValue){
+  var host=document.getElementById('flowDecisionFindings');
+  var list=document.getElementById('flowDecisionFindingsList');
+  var count=document.getElementById('flowDecisionFindingsCount');
+  if(!host || !list) return 0;
+  coverageClear(list);
+  var normalized=(query || '').toLowerCase();
+  var records=currentFlowTriageRecords().filter(function(record){
+    var decision=record.decision || {};
+    if(!flowDecisionStatusMatches(decision.status || '',statusFilterValue || '')) return false;
+    if(typeValue || severityValue) return false;
+    var searchable=[record.entry.entrypoint,record.entry.file,
+      coverageLabels[record.control] || record.control,decision.note || '',decision.status || '']
+      .join(' ').toLowerCase();
+    return !normalized || searchable.indexOf(normalized)!==-1;
+  });
+  records.forEach(function(record){
+    var decision=record.decision || {};
+    var status=decision.status || '';
+    var item=coverageElement('div','flow-decision-record' + (status?' ' + status:''));
+    item.appendChild(coverageElement('div','flow-decision-record-title',record.entry.entrypoint));
+    item.appendChild(coverageElement('span','flow-decision-record-status' +
+      (status?' ' + status:''),status ? (flowTriageLabels[status] || status) : 'Open / untriaged'));
+    var subject=record.control==='__flow__' ? 'Complete flow' :
+      'Control: ' + (coverageLabels[record.control] || record.control);
+    item.appendChild(coverageElement('div','flow-decision-record-meta',subject + ' · ' +
+      coverageLocation(record.entry)));
+    if(decision.note) item.appendChild(coverageElement('div','flow-decision-record-note',
+      'Note: ' + decision.note));
+    var open=coverageElement('button','flow-decision-record-open','Open in Security Flow Explorer');
+    open.type='button'; open.addEventListener('click',function(){ openFlowTriageRecord(record); });
+    item.appendChild(open); list.appendChild(item);
+  });
+  /* The stylesheet hides this section by default.  Use an explicit display
+     value when records exist; clearing the inline value would leave the
+     stylesheet's display:none in force. */
+  host.style.display=records.length?'block':'none';
+  if(count) count.textContent=records.length + ' decision' + (records.length===1?'':'s');
+  return records.length;
+}
+function saveFlowTriage(){
+  try{ localStorage.setItem(FLOW_TKEY,JSON.stringify(flowTriage)); }catch(e){}
+}
+function updateFlowTriageCount(){
+  var relevant=[];
+  coverageEntries.forEach(function(entry){
+    relevant.push(coverageControlKey(entry,'__flow__'));
+    coverageOrder.forEach(function(control){
+      if(Object.prototype.hasOwnProperty.call(entry.controls || {},control))
+        relevant.push(coverageControlKey(entry,control));
+    });
+  });
+  var count=relevant.filter(function(key){
+    var item=flowTriage[key] || {}; return Boolean(item.status || item.note);
+  }).length;
+  var node=document.getElementById('flowTriageCount');
+  if(node) node.innerHTML='Triaged <b>' + count + '</b> of <b>' + relevant.length +
+    '</b> flow/control decisions';
+  renderFlowDecisionSummary();
+}
+function updateControlTriageBadge(button,entry,control){
+  if(!button) return;
+  var old=button.querySelector('.coverage-control-triage');
+  if(old) old.remove();
+  var decision=flowTriage[coverageControlKey(entry,control)] || {};
+  if(decision.status){
+    button.appendChild(coverageElement('span','coverage-control-triage ' + decision.status,
+      flowTriageLabels[decision.status] || decision.status));
+  }
+}
+function updateFlowDecision(entry){
+  var select=document.getElementById('coverageFlowDecision');
+  var note=document.getElementById('coverageFlowDecisionNote');
+  if(!select || !entry) return;
+  var decision=flowTriage[coverageControlKey(entry,'__flow__')] || {};
+  select.className='coverage-flow-decision' + (decision.status?' ' + decision.status:'');
+  select.value=decision.status || '';
+  if(note) note.value=decision.note || '';
+}
+function persistCompleteFlowDecision(entry){
+  var select=document.getElementById('coverageFlowDecision');
+  var note=document.getElementById('coverageFlowDecisionNote');
+  if(!select || !entry) return;
+  var key=coverageControlKey(entry,'__flow__');
+  var decision={status:select.value,note:note ? note.value : '',
+    updated:new Date().toISOString(),entrypoint:entry.entrypoint,
+    control:'__flow__',file:entry.file,line:entry.line};
+  if(!decision.status && !decision.note) delete flowTriage[key];
+  else flowTriage[key]=decision;
+  saveFlowTriage(); updateFlowTriageCount(); updateFlowDecision(entry);
+  updateTriageCount(); applyFilters();
+}
+function renderFlowTriageEditor(entry,control){
+  coverageSelectedControl=control || '';
+  var host=document.getElementById('coverageControlTriage');
+  if(!host) return;
+  coverageClear(host);
+  if(!entry || !control){ host.style.display='none'; return; }
+  host.style.display='grid';
+  var key=coverageControlKey(entry,control);
+  var decision=flowTriage[key] || {};
+  host.appendChild(coverageElement('label','',
+    'Flow/control decision · ' + (coverageLabels[control] || control)));
+  var select=coverageElement('select','');
+  [['','Open / untriaged'],['confirmed','Confirmed'],['false-positive','False Positive'],
+   ['accepted-risk','Accepted Risk'],['fixed','Fixed']].forEach(function(option){
+    var node=coverageElement('option','',option[1]); node.value=option[0]; select.appendChild(node);
+  });
+  select.value=decision.status || '';
+  var note=coverageElement('input',''); note.type='text';
+  note.placeholder='Decision note or evidence…'; note.value=decision.note || '';
+  function persist(){
+    var value={status:select.value,note:note.value,updated:new Date().toISOString(),
+      entrypoint:entry.entrypoint,control:control,file:entry.file,line:entry.line};
+    if(!value.status && !value.note) delete flowTriage[key]; else flowTriage[key]=value;
+    saveFlowTriage(); updateFlowTriageCount(); updateTriageCount(); applyFilters();
+    if(control==='__flow__') updateFlowDecision(entry);
+    else{
+      var button=document.querySelector('#coverageControls [data-control="' + control + '"]');
+      updateControlTriageBadge(button,entry,control);
+    }
+  }
+  select.addEventListener('change',persist); note.addEventListener('change',persist);
+  host.appendChild(select); host.appendChild(note);
+}
+function coverageOverall(entry){
+  var values=Object.keys(entry.controls || {}).map(function(k){ return entry.controls[k]; });
+  if(values.indexOf('MISSING')!==-1) return 'GAP';
+  if(values.indexOf('UNKNOWN')!==-1) return 'REVIEW';
+  return 'COVERED';
+}
+function coverageHasReferenceFlow(entry){
+  if(typeof entry.reference_flow==='boolean') return entry.reference_flow;
+  return Boolean((entry.flow_steps || []).length>1 || (entry.sinks || []).length ||
+                 (entry.unresolved_calls || []).length);
+}
+function coverageMatchesFlowFilter(entry, filter){
+  if(filter==='has-flow') return coverageHasReferenceFlow(entry);
+  if(filter==='no-flow') return !coverageHasReferenceFlow(entry);
+  if(filter==='sensitive') return Boolean((entry.sinks || []).length ||
+                                          (entry.sensitive_sinks || []).length);
+  if(filter==='unresolved') return Boolean((entry.unresolved_calls || []).length);
+  if(filter==='risk') return coverageAttackPaths.some(function(path){
+    return Number(path.entry_index)===coverageEntries.indexOf(entry);
+  });
+  return true;
+}
+function coverageLocation(item){
+  if(!item || !item.file) return 'Source location unavailable';
+  return item.file + (item.line ? ':' + item.line : '');
+}
+function showCoverageCode(source){
+  var location=document.getElementById('coverageCodeLocation');
+  var frame=document.getElementById('coverageCodeFrame');
+  if(!frame) return;
+  coverageClear(frame);
+  if(location) location.textContent=coverageLocation(source);
+  var context=source && source.context ? source.context : [];
+  if(!context.length){
+    frame.appendChild(coverageElement('div','coverage-code-empty',
+      'No source context is available for this location.'));
+    return;
+  }
+  var hit=null;
+  context.forEach(function(row){
+    var line=coverageElement('span','coverage-code-line' + (row.hit?' hit':''));
+    line.appendChild(coverageElement('span','coverage-code-number',row.line));
+    line.appendChild(coverageElement('span','coverage-code-text',row.text));
+    frame.appendChild(line);
+    if(row.hit) hit=line;
+  });
+  if(hit) frame.scrollTop=Math.max(0,hit.offsetTop-frame.clientHeight/2);
+}
+function coverageSameReference(candidate,target,kind){
+  if(!candidate || !target) return false;
+  /* Sink locations often point at different call sites.  Matching the modeled
+     sink signature as well exposes all callers; the explorer keeps file/line
+     evidence visible so reviewers can reject overloaded-method false positives. */
+  if(kind==='SINK' && candidate.label && candidate.label===target.label) return true;
+  if(candidate.file && target.file && candidate.line && target.line){
+    return candidate.file===target.file && Number(candidate.line)===Number(target.line);
+  }
+  return Boolean(candidate.label && target.label && candidate.label===target.label);
+}
+function showCoverageReferences(target,kind){
+  var list=document.getElementById('coverageReferenceList');
+  var countNode=document.getElementById('coverageReferenceCount');
+  var titleNode=document.getElementById('coverageReferenceTitle');
+  if(!list) return;
+  coverageClear(list);
+  var references=[];
+  coverageEntries.forEach(function(entry,index){
+    var items=kind==='SINK' ? (entry.sinks || []) : (entry.flow_steps || []);
+    if(items.some(function(item){ return coverageSameReference(item,target,kind); })){
+      references.push({entry:entry,index:index});
+    }
+  });
+  if(titleNode) titleNode.textContent='Find All References' +
+    (target && target.label ? ' · ' + target.label : '');
+  if(countNode) countNode.textContent=references.length +
+    ' reachable entr' + (references.length===1?'y point':'y points');
+  if(!references.length){
+    list.appendChild(coverageElement('div','coverage-detail-empty',
+      'No controller, listener, or scheduled entry point references this location.'));
+    return;
+  }
+  references.forEach(function(reference){
+    var entry=reference.entry;
+    var item=coverageElement('div','coverage-reference-item');
+    var open=coverageElement('button','coverage-reference-entry',entry.entrypoint);
+    open.type='button';
+    open.addEventListener('click',function(){ renderCoverageEntry(reference.index); });
+    item.appendChild(open);
+    item.appendChild(coverageElement('span','coverage-reference-policy',
+      (entry.route_policy || 'unknown').toUpperCase()));
+    var path=(entry.flow_steps || []).map(function(step){ return step.label; });
+    (entry.sinks || []).forEach(function(sink){ path.push('SINK: ' + sink.label); });
+    item.appendChild(coverageElement('span','coverage-reference-path',
+      path.length ? path.join(' → ') : 'Entry point only'));
+    var rules=coverageElement('div','coverage-reference-rules');
+    (entry.policy_sources || []).forEach(function(source){
+      var link=coverageElement('button','coverage-source-link',
+        'Security rule · ' + coverageLocation(source));
+      link.type='button'; link.addEventListener('click',function(){ showCoverageCode(source); });
+      rules.appendChild(link);
+    });
+    if(!rules.childNodes.length){
+      rules.appendChild(coverageElement('span','coverage-detail-empty',
+        'No statically resolved security-rule source.'));
+    }
+    item.appendChild(rules); list.appendChild(item);
+  });
+}
+function renderCoverageExplanation(body, explanation){
+  if(!body || !explanation) return;
+  var grid=coverageElement('div','coverage-explanation');
+  function card(label,value,wide){
+    var item=coverageElement('div','coverage-explanation-card' + (wide?' wide':''));
+    item.appendChild(coverageElement('span','coverage-explanation-label',label));
+    item.appendChild(coverageElement('div','coverage-explanation-value',value));
+    grid.appendChild(item);
+  }
+  card('Decision rationale',explanation.summary || 'No rationale recorded.',true);
+  card('Why this is sufficient / insufficient',explanation.why || 'No conclusion recorded.',true);
+  card('Inspected',(explanation.inspected || []).join(' · ') || 'No inspection inventory.');
+  card('Uncertainty',(explanation.uncertainty || []).join(' · ') || 'None recorded.');
+  var confidence=coverageElement('span','coverage-confidence ' +
+    (explanation.confidence || 'REVIEW'),explanation.confidence || 'REVIEW');
+  var confidenceCard=coverageElement('div','coverage-explanation-card');
+  confidenceCard.appendChild(coverageElement('span','coverage-explanation-label','Confidence'));
+  confidenceCard.appendChild(confidence); grid.appendChild(confidenceCard);
+  card('Evidence retained',(explanation.found || []).length + ' item(s)');
+  body.appendChild(grid);
+}
+function showCoverageDetail(title, evidence, sources, explanation){
+  var titleNode=document.getElementById('coverageDetailTitle');
+  var body=document.getElementById('coverageDetailBody');
+  if(titleNode) titleNode.textContent=title;
+  if(!body) return;
+  coverageClear(body);
+  renderCoverageExplanation(body,explanation);
+  if(!evidence || !evidence.length){
+    body.appendChild(coverageElement('div','coverage-detail-empty','No additional static evidence is available.'));
+  }else{
+    var list=coverageElement('ul','coverage-detail-list');
+    evidence.forEach(function(item){ list.appendChild(coverageElement('li','',item)); });
+    body.appendChild(list);
+  }
+  if(sources && sources.length){
+    var links=coverageElement('div','coverage-source-links');
+    sources.forEach(function(source){
+      var link=coverageElement('button','coverage-source-link',
+        (source.label || 'Source') + ' · ' + coverageLocation(source));
+      link.type='button';
+      link.addEventListener('click',function(){ showCoverageCode(source); });
+      links.appendChild(link);
+    });
+    body.appendChild(links);
+  }
+}
+function appendCoveragePolicy(list, label, value){
+  list.appendChild(coverageElement('dt','',label));
+  list.appendChild(coverageElement('dd','',value));
+}
+function appendCoverageFlowNode(container, item, kind, evidence){
+  if(container.childNodes.length) container.appendChild(coverageElement('span','coverage-arrow','→'));
+  var button=coverageElement('button','coverage-flow-node ' + kind);
+  button.type='button';
+  button.appendChild(coverageElement('span','coverage-node-kind',kind.replace('_',' ')));
+  button.appendChild(coverageElement('span','coverage-node-label',item.label || '<unknown>'));
+  button.appendChild(coverageElement('span','coverage-node-loc',coverageLocation(item)));
+  button.addEventListener('click',function(){
+    container.querySelectorAll('.coverage-flow-node').forEach(function(node){ node.classList.remove('active'); });
+    button.classList.add('active');
+    showCoverageDetail((item.label || kind) + ' — source',
+                       evidence || [coverageLocation(item)],[item]);
+    showCoverageCode(item);
+    showCoverageReferences(item,kind);
+  });
+  container.appendChild(button);
+}
+function renderCoverageEntry(index){
+  if(!coverageEntries.length) return;
+  coverageSelected=Math.max(0,Math.min(index,coverageEntries.length-1));
+  var entry=coverageEntries[coverageSelected];
+  document.querySelectorAll('.coverage-entry').forEach(function(button){
+    button.classList.toggle('active',Number(button.getAttribute('data-index'))===coverageSelected);
+  });
+  var name=document.getElementById('coverageEntryName');
+  var loc=document.getElementById('coverageEntryLocation');
+  var state=document.getElementById('coverageEntryState');
+  if(name) name.textContent=entry.entrypoint;
+  if(loc) loc.textContent=coverageLocation(entry) + ' · ' + (entry.kind || 'entry point');
+  var overall=coverageOverall(entry);
+  if(state){ state.className='coverage-state ' + overall; state.textContent=overall; }
+  updateFlowDecision(entry);
+  var flowDecision=document.getElementById('coverageFlowDecision');
+  if(flowDecision) flowDecision.onchange=function(){ persistCompleteFlowDecision(entry); };
+  var flowDecisionNote=document.getElementById('coverageFlowDecisionNote');
+  if(flowDecisionNote) flowDecisionNote.oninput=function(){ persistCompleteFlowDecision(entry); };
+
+  var policy=document.getElementById('coveragePolicy');
+  if(policy){
+    coverageClear(policy);
+    appendCoveragePolicy(policy,'Matched policy',(entry.route_policy || 'unknown').toUpperCase());
+    appendCoveragePolicy(policy,'Route',entry.route || entry.entrypoint);
+    appendCoveragePolicy(policy,'Configuration evidence',
+      (entry.policy_evidence && entry.policy_evidence.length) ? entry.policy_evidence.join(' · ') :
+      'No statically resolved route policy');
+    appendCoveragePolicy(policy,'Required roles / authorities',
+      (entry.required_permissions && entry.required_permissions.length) ?
+        entry.required_permissions.join(', ') : 'No explicit role or authority extracted');
+    var conditions=[];
+    (entry.activation_conditions || []).forEach(function(item){ conditions.push(item); });
+    (entry.policy_conditions || []).forEach(function(item){ if(conditions.indexOf(item)<0) conditions.push(item); });
+    (entry.configuration_profiles || []).forEach(function(item){ if(conditions.indexOf(item)<0) conditions.push(item); });
+    appendCoveragePolicy(policy,'Activation / environment',
+      conditions.length ? conditions.join(' · ') : 'No profile or conditional bean constraint detected');
+  }
+  var policySource=document.getElementById('coveragePolicySource');
+  var policySources=entry.policy_sources || [];
+  if(policySource){
+    policySource.style.display=policySources.length?'':'none';
+    policySource.onclick=function(){
+      if(policySources.length){
+        showCoverageCode(policySources[0]);
+        showCoverageDetail('Effective security configuration',
+          entry.policy_evidence || [],policySources);
+      }
+    };
+  }
+
+  var flow=document.getElementById('coverageFlow');
+  var steps=[];
+  if(flow){
+    coverageClear(flow);
+    steps=(entry.flow_steps && entry.flow_steps.length) ? entry.flow_steps :
+      (entry.flow || []).map(function(label,i){ return {label:label,file:i===0?entry.file:'',line:i===0?entry.line:0}; });
+    steps.forEach(function(step,i){
+      appendCoverageFlowNode(flow,step,i===0?'ENTRYPOINT':'METHOD',[
+        coverageLocation(step),
+        step.class_name && step.method ? 'Method: ' + step.class_name + '.' + step.method + '()' : step.label
+      ]);
+    });
+    var sinks=(entry.sinks && entry.sinks.length) ? entry.sinks :
+      (entry.sensitive_sinks || []).map(function(label){ return {label:label,file:'',line:0}; });
+    sinks.forEach(function(sink){
+      appendCoverageFlowNode(flow,sink,'SINK',[coverageLocation(sink),'Sensitive sink: ' + sink.label]);
+    });
+    (entry.unresolved_calls || []).forEach(function(call){
+      appendCoverageFlowNode(flow,{label:call,file:'',line:0},'UNRESOLVED',[
+        'The target implementation could not be resolved statically.',call]);
+    });
+    if(!flow.childNodes.length) flow.appendChild(
+      coverageElement('div','coverage-detail-empty','No reachable processing path was resolved.'));
+  }
+  if(steps.length){ showCoverageCode(steps[0]); showCoverageReferences(steps[0],'ENTRYPOINT'); }
+  else if((entry.sinks || []).length){
+    showCoverageCode(entry.sinks[0]); showCoverageReferences(entry.sinks[0],'SINK');
+  }else{ showCoverageCode({}); showCoverageReferences({},''); }
+
+  var controls=document.getElementById('coverageControls');
+  var firstGap='';
+  if(controls){
+    coverageClear(controls);
+    coverageOrder.forEach(function(key){
+      if(!Object.prototype.hasOwnProperty.call(entry.controls || {},key)) return;
+      var status=entry.controls[key] || 'UNKNOWN';
+      if(!firstGap && (status==='MISSING' || status==='UNKNOWN')) firstGap=key;
+      var button=coverageElement('button','coverage-control');
+      button.type='button'; button.setAttribute('data-control',key);
+      button.appendChild(coverageElement('span','',coverageLabels[key] || key));
+      button.appendChild(coverageElement('span','coverage-control-status ' + status,
+        status==='NOT_REQUIRED' ? 'N/A' : status));
+      updateControlTriageBadge(button,entry,key);
+      button.addEventListener('click',function(){
+        controls.querySelectorAll('.coverage-control').forEach(function(node){ node.classList.remove('active'); });
+        button.classList.add('active');
+        var sources=((entry.control_sources || {})[key] || []).slice();
+        var fallback=false;
+        if(!sources.length && (status==='MISSING' || status==='UNKNOWN')){
+          sources=(entry.sinks || []).slice(0,2);
+          fallback=Boolean(sources.length);
+        }
+        var detailEvidence=((entry.evidence || {})[key] || []).slice();
+        if(fallback) detailEvidence.push(
+          'No supporting control location was found; showing the terminal sink for false-positive review.');
+        showCoverageDetail((coverageLabels[key] || key) + ' — ' + status,
+                           detailEvidence,sources,
+                           (entry.control_explanations || {})[key]);
+        if(sources.length) showCoverageCode(sources[0]);
+        renderFlowTriageEditor(entry,key);
+      });
+      controls.appendChild(button);
+    });
+  }
+  var initial=firstGap || coverageOrder.find(function(key){
+    return Object.prototype.hasOwnProperty.call(entry.controls || {},key);
+  });
+  if(initial){
+    var initialButton=controls && controls.querySelector('[data-control="' + initial + '"]');
+    if(initialButton) initialButton.classList.add('active');
+    var initialSources=((entry.control_sources || {})[initial] || []).slice();
+    var initialEvidence=((entry.evidence || {})[initial] || []).slice();
+    if(!initialSources.length && (entry.controls[initial]==='MISSING' ||
+                                  entry.controls[initial]==='UNKNOWN')){
+      initialSources=(entry.sinks || []).slice(0,2);
+      if(initialSources.length) initialEvidence.push(
+        'No supporting control location was found; the terminal sink is available for false-positive review.');
+    }
+    showCoverageDetail((coverageLabels[initial] || initial) + ' — ' + entry.controls[initial],
+                       initialEvidence,initialSources,
+                       (entry.control_explanations || {})[initial]);
+    renderFlowTriageEditor(entry,initial);
+  }else{
+    renderFlowTriageEditor(null,'');
+  }
+}
+function renderCoverageList(){
+  var list=document.getElementById('coverageEntryList');
+  if(!list) return;
+  coverageClear(list);
+  var searchNode=document.getElementById('coverageSearch');
+  var filterNode=document.getElementById('coverageFlowFilter');
+  var normalized=(searchNode ? searchNode.value : '').toLowerCase();
+  var flowFilter=filterNode ? filterNode.value : 'all';
+  var visible=[];
+  coverageEntries.forEach(function(entry,index){
+    var searchable=(entry.entrypoint + ' ' + entry.file + ' ' + entry.method).toLowerCase();
+    if(normalized && searchable.indexOf(normalized)===-1) return;
+    if(!coverageMatchesFlowFilter(entry,flowFilter)) return;
+    visible.push({entry:entry,index:index});
+  });
+  if(visible.length && !visible.some(function(item){ return item.index===coverageSelected; })){
+    coverageSelected=visible[0].index;
+    renderCoverageEntry(coverageSelected);
+  }
+  visible.forEach(function(item){
+    var entry=item.entry, index=item.index;
+    var overall=coverageOverall(entry);
+    var button=coverageElement('button','coverage-entry' + (index===coverageSelected?' active':''));
+    button.type='button'; button.setAttribute('data-index',String(index));
+    button.appendChild(coverageElement('span','coverage-entry-dot ' + overall));
+    var copy=coverageElement('span','');
+    copy.appendChild(coverageElement('span','coverage-entry-name',entry.entrypoint));
+    copy.appendChild(coverageElement('span','coverage-entry-loc',coverageLocation(entry)));
+    copy.appendChild(coverageElement('span','coverage-entry-flow ' +
+      (coverageHasReferenceFlow(entry)?'HAS_FLOW':'NO_FLOW'),
+      coverageHasReferenceFlow(entry)?'REFERENCE FLOW':'NO REFERENCE FLOW'));
+    button.appendChild(copy);
+    button.addEventListener('click',function(){ renderCoverageEntry(index); });
+    list.appendChild(button);
+  });
+  if(!list.childNodes.length) list.appendChild(
+    coverageElement('div','coverage-detail-empty','No matching entry points.'));
+}
+if(coverageEntries.length){
+  renderCoverageList(); renderCoverageEntry(coverageSelected);
+  var coverageSearch=document.getElementById('coverageSearch');
+  if(coverageSearch) coverageSearch.addEventListener('input',function(){
+    renderCoverageList();
+  });
+  var coverageFlowFilter=document.getElementById('coverageFlowFilter');
+  if(coverageFlowFilter) coverageFlowFilter.addEventListener('change',renderCoverageList);
+}
+document.querySelectorAll('[data-attack-entry]').forEach(function(button){
+  button.addEventListener('click',function(){
+    setReportView('flow',true);
+    renderCoverageEntry(Number(button.getAttribute('data-attack-entry')) || 0);
+    var dashboard=document.getElementById('coverageDashboard');
+    if(dashboard) dashboard.scrollIntoView({behavior:'smooth',block:'start'});
+  });
+});
+
+/* ---- Security-policy snapshots and drift --------------------------- */
+function coveragePolicyIdentity(entry){
+  return [entry.kind || '',entry.http_method || '',entry.route || entry.entrypoint || '',
+          entry.method || ''].join('::');
+}
+function coveragePolicySnapshotEntry(entry){
+  return {id:coveragePolicyIdentity(entry),entrypoint:entry.entrypoint || '',
+    kind:entry.kind || '',http_method:entry.http_method || '',route:entry.route || '',
+    method:entry.method || '',route_policy:entry.route_policy || 'unknown',
+    controls:entry.controls || {},required_permissions:(entry.required_permissions || []).slice().sort(),
+    activation_conditions:(entry.activation_conditions || []).slice().sort(),
+    policy_conditions:(entry.policy_conditions || []).slice().sort(),
+    configuration_profiles:(entry.configuration_profiles || []).slice().sort()};
+}
+function currentPolicySnapshot(){
+  return {tool:'JSpringGuard',kind:'security-policy-snapshot',version:1,
+    exported:new Date().toISOString(),entries:coverageEntries.map(coveragePolicySnapshotEntry)};
+}
+function policyArraysEqual(left,right){
+  return JSON.stringify((left || []).slice().sort())===JSON.stringify((right || []).slice().sort());
+}
+function comparePolicySnapshots(previous){
+  var priorEntries=previous && previous.entries ? previous.entries : [];
+  if(!Array.isArray(priorEntries)) throw new Error('snapshot entries must be an array');
+  var prior={},current={};
+  priorEntries.forEach(function(entry){
+    var normalized=coveragePolicySnapshotEntry(entry);
+    prior[entry.id || normalized.id]=normalized;
+  });
+  coverageEntries.forEach(function(entry){
+    var normalized=coveragePolicySnapshotEntry(entry); current[normalized.id]=normalized;
+  });
+  var changes=[];
+  Object.keys(current).forEach(function(id){
+    var now=current[id],before=prior[id];
+    if(!before){ changes.push({kind:'added',entrypoint:now.entrypoint,
+      text:'New security entry point'}); return; }
+    if((before.route_policy || 'unknown')!==(now.route_policy || 'unknown')){
+      var weak=['permitall','anonymous','unknown'];
+      changes.push({kind:weak.indexOf((now.route_policy || '').toLowerCase())>=0?'degraded':'changed',
+        entrypoint:now.entrypoint,text:'Route policy: ' + before.route_policy + ' → ' + now.route_policy});
+    }
+    var keys={}; Object.keys(before.controls || {}).forEach(function(key){keys[key]=true;});
+    Object.keys(now.controls || {}).forEach(function(key){keys[key]=true;});
+    var rank={MISSING:0,UNKNOWN:1,COVERED:2,NOT_REQUIRED:2};
+    Object.keys(keys).forEach(function(key){
+      var oldStatus=(before.controls || {})[key] || 'UNKNOWN';
+      var newStatus=(now.controls || {})[key] || 'UNKNOWN';
+      if(oldStatus===newStatus) return;
+      var kind=(rank[newStatus] || 0)<(rank[oldStatus] || 0)?'degraded':
+        (rank[newStatus] || 0)>(rank[oldStatus] || 0)?'improved':'changed';
+      changes.push({kind:kind,entrypoint:now.entrypoint,
+        text:(coverageLabels[key] || key) + ': ' + oldStatus + ' → ' + newStatus});
+    });
+    if(!policyArraysEqual(before.required_permissions,now.required_permissions)){
+      changes.push({kind:'changed',entrypoint:now.entrypoint,
+        text:'Permissions: ' + ((before.required_permissions || []).join(', ') || 'none') +
+          ' → ' + ((now.required_permissions || []).join(', ') || 'none')});
+    }
+    var oldConditions=(before.activation_conditions || []).concat(
+      before.policy_conditions || [],before.configuration_profiles || []);
+    var newConditions=(now.activation_conditions || []).concat(
+      now.policy_conditions || [],now.configuration_profiles || []);
+    if(!policyArraysEqual(oldConditions,newConditions)){
+      changes.push({kind:'changed',entrypoint:now.entrypoint,
+        text:'Spring profile / bean activation conditions changed'});
+    }
+  });
+  Object.keys(prior).forEach(function(id){
+    if(!current[id]) changes.push({kind:'removed',entrypoint:prior[id].entrypoint,
+      text:'Previously reachable security entry point is no longer present'});
+  });
+  return changes;
+}
+function renderPolicyDrift(changes){
+  var host=document.getElementById('coverageDrift');
+  var list=document.getElementById('coverageDriftList');
+  var summary=document.getElementById('coverageDriftSummary');
+  if(!host || !list) return;
+  coverageClear(list); host.style.display='block';
+  if(summary){
+    var degraded=changes.filter(function(item){return item.kind==='degraded';}).length;
+    summary.textContent=changes.length + ' change(s) · ' + degraded + ' degradation(s)';
+  }
+  if(!changes.length){
+    list.appendChild(coverageElement('div','coverage-detail-empty',
+      'No security-policy drift was detected against the imported snapshot.'));
+    return;
+  }
+  changes.forEach(function(change){
+    var item=coverageElement('div','coverage-drift-item ' + change.kind);
+    item.appendChild(coverageElement('div','coverage-drift-entry',change.entrypoint));
+    item.appendChild(coverageElement('span','coverage-drift-change',change.text));
+    list.appendChild(item);
+  });
+}
+var exportPolicySnapshot=document.getElementById('exportPolicySnapshot');
+if(exportPolicySnapshot) exportPolicySnapshot.addEventListener('click',function(){
+  downloadDecisionJson('jspringguard-security-policy-snapshot.json',currentPolicySnapshot());
+});
+var importPolicySnapshot=document.getElementById('importPolicySnapshot');
+if(importPolicySnapshot) importPolicySnapshot.addEventListener('change',function(){
+  var file=importPolicySnapshot.files && importPolicySnapshot.files[0]; if(!file) return;
+  var reader=new FileReader();
+  reader.onload=function(){
+    try{
+      var previous=JSON.parse(reader.result);
+      if(previous.kind && previous.kind!=='security-policy-snapshot')
+        throw new Error('not a JSpringGuard security-policy snapshot');
+      renderPolicyDrift(comparePolicySnapshots(previous));
+    }catch(error){ alert('Could not compare that security-policy snapshot:\n' + error); }
+    importPolicySnapshot.value='';
+  };
+  reader.readAsText(file);
+});
+updateFlowTriageCount();
+function flowTriageExportPayload(exported){
+  return {tool:'JSpringGuard',kind:'flow-control-triage',version:1,
+    exported:exported,entries:flowTriage};
+}
+var importFlowTriage=document.getElementById('importFlowTriage');
+if(importFlowTriage) importFlowTriage.addEventListener('change',function(){
+  var file=importFlowTriage.files && importFlowTriage.files[0]; if(!file) return;
+  var reader=new FileReader();
+  reader.onload=function(){
+    try{
+      var data=JSON.parse(reader.result);
+      var entries=data && data.entries ? data.entries : data;
+      if(typeof entries!=='object' || entries===null) throw new Error('unexpected format');
+      Object.keys(entries).forEach(function(key){ flowTriage[key]=entries[key]; });
+      saveFlowTriage(); updateFlowTriageCount(); renderCoverageEntry(coverageSelected);
+      updateTriageCount(); applyFilters();
+      alert('Imported ' + Object.keys(entries).length + ' flow/control triage entries.');
+    }catch(error){
+      alert('Could not read that file as a JSpringGuard flow-triage export:\n' + error);
+    }
+    importFlowTriage.value='';
+  };
+  reader.readAsText(file);
+});
+
 /* ---- Triage: per-finding status + note, keyed by fingerprint ----------
    The fingerprint is stable across re-scans, so a decision made in one
    report can be imported into the next one and still match. Stored in
@@ -3609,7 +4344,7 @@ var TKEY='jspringguardTriage';
 var triage={};
 try{ triage = JSON.parse(localStorage.getItem(TKEY) || '{}') || {}; }catch(e){ triage={}; }
 
-var STATUS_LABEL={'in-review':'In review','fixed':'Fixed',
+var STATUS_LABEL={'confirmed':'Confirmed','in-review':'In review','fixed':'Fixed',
                   'false-positive':'False positive','accepted':'Accepted risk'};
 
 function saveTriage(){
@@ -3648,12 +4383,17 @@ function updateTriageCount(){
   var cards = document.querySelectorAll('.card');
   var done = 0;
   cards.forEach(function(c){ if(c.getAttribute('data-status')) done++; });
+  var flowDone=currentFlowTriageRecords().length;
   var el = document.getElementById('triageCount');
-  if(el) el.innerHTML = 'Triaged <b>' + done + '</b> of <b>' + cards.length + '</b> finding(s)';
+  if(el) el.innerHTML = 'Finding triage <b>' + done + '</b> of <b>' + cards.length +
+    '</b> · Flow/control decisions <b>' + flowDone + '</b>';
 }
 function renderAllTriage(){
   document.querySelectorAll('.card').forEach(renderCardTriage);
   updateTriageCount();
+  renderFlowDecisionFindings(statusFilter ? statusFilter.value : '',
+    search ? search.value.toLowerCase() : '',typeFilter ? typeFilter.value : '',
+    sevFilter ? sevFilter.value : '');
 }
 renderAllTriage();
 
@@ -3685,16 +4425,28 @@ document.querySelectorAll('.triage-note').forEach(function(inp){
   });
 });
 
-var exportBtn=document.getElementById('exportTriage');
-if(exportBtn) exportBtn.addEventListener('click', function(){
-  var payload = {tool:'JSpringGuard', kind:'triage', version:1,
-                 exported: new Date().toISOString(), entries: triage};
+function downloadDecisionJson(filename,payload){
   var blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'jspringguard-triage.json';
+  a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); },1000);
+}
+var exportTriage=document.getElementById('exportTriage');
+if(exportTriage) exportTriage.addEventListener('click',function(){
+  downloadDecisionJson('jspringguard-finding-triage.json',{
+    tool:'JSpringGuard',kind:'triage',version:1,entries:triage});
+});
+var exportAllTriage=document.getElementById('exportAllTriage');
+if(exportAllTriage) exportAllTriage.addEventListener('click',function(){
+  var exported=new Date().toISOString();
+  downloadDecisionJson('jspringguard-finding-triage.json',{
+    tool:'JSpringGuard',kind:'triage',version:1,exported:exported,entries:triage
+  });
+  downloadDecisionJson('jspringguard-flow-triage.json',flowTriageExportPayload(exported));
 });
 
 var importInput=document.getElementById('importTriage');
@@ -3714,7 +4466,7 @@ if(importInput) importInput.addEventListener('change', function(){
       saveTriage(); renderAllTriage(); applyFilters();
       alert('Imported ' + added + ' triage entr' + (added===1?'y':'ies') + '.');
     }catch(err){
-      alert('Could not read that file as a JSpringGuard triage export:\\n' + err);
+      alert('Could not read that file as a JSpringGuard triage export:\n' + err);
     }
     importInput.value = '';
   };
@@ -3723,7 +4475,7 @@ if(importInput) importInput.addEventListener('change', function(){
 
 var clearBtn=document.getElementById('clearTriage');
 if(clearBtn) clearBtn.addEventListener('click', function(){
-  if(!confirm('Remove all statuses and notes stored in this browser?\\n' +
+  if(!confirm('Remove all statuses and notes stored in this browser?\n' +
               'Export first if you want to keep them.')) return;
   triage = {};
   saveTriage(); renderAllTriage(); applyFilters();
@@ -3734,6 +4486,7 @@ document.querySelectorAll('.source-context').forEach(function(pre){
   if(hit) pre.scrollTop = hit.offsetTop - pre.clientHeight / 2;
 });
 })();
+
 """
 
 
@@ -3774,6 +4527,16 @@ def to_html(findings: List[Finding], scanned: int, builds: int,
     parts.append("</div></header>")
 
     parts.append("<div class='shell'>")
+    parts.append("<nav class='report-menu' role='tablist' aria-label='Report views'>"
+                 "<a class='report-menu-link active' href='#findings' role='tab' "
+                 "aria-selected='true' data-report-view-target='findings'>Findings"
+                 f"<span class='report-menu-count'>{len(findings)}</span></a>")
+    if coverage is not None:
+        parts.append("<a class='report-menu-link' href='#security-flow' role='tab' "
+                     "aria-selected='false' data-report-view-target='flow'>Security Flow Explorer"
+                     f"<span class='report-menu-count'>{len(coverage)}</span></a>")
+    parts.append("<button class='report-menu-action' id='exportAllTriage' type='button'>"
+                 "Export all triage</button></nav><span id='findings'></span>")
 
     def _chip(sev: str, css_class: str, label: str, extra_attr: str = "") -> str:
         n = counts.get(sev, 0)
@@ -3793,28 +4556,9 @@ def to_html(findings: List[Finding], scanned: int, builds: int,
                  + "</div>")
 
     if coverage is not None:
-        parts.append("<section class='coverage-wrap'><h2>Security control coverage</h2>")
-        if not coverage:
-            parts.append("<p>No supported HTTP, listener, or scheduled entry points were found.</p>")
-        else:
-            parts.append("<table class='coverage-table'><thead><tr><th>Entry point</th>"
-                         + "".join(f"<th>{esc(label)}</th>" for _, label in _COVERAGE_COLUMNS)
-                         + "</tr></thead><tbody>")
-            for entry in coverage:
-                parts.append(f"<tr><td><code>{esc(entry.entrypoint)}</code><br>"
-                             f"<span class='dim'>{esc(entry.file)}:{entry.line}</span></td>")
-                for key, _ in _COVERAGE_COLUMNS:
-                    status = entry.controls.get(key, "UNKNOWN")
-                    parts.append(f"<td class='cov-{esc(status)}'>{esc(_COVERAGE_MARK.get(status, status))}</td>")
-                parts.append("</tr>")
-            parts.append("</tbody></table>")
-            totals = coverage_summary(coverage)
-            parts.append("<p class='dim'>" + " &middot; ".join(
-                f"{esc(status)}: {totals.get(status, 0)}"
-                for status in ("COVERED", "MISSING", "UNKNOWN", "NOT_REQUIRED")) + "</p>")
-        parts.append("</section>")
+        parts.append(coverage_explorer_html(coverage))
 
-    if findings:
+    if findings or coverage is not None:
         categories = sorted({categorize_rule(f.rule_id) for f in findings})
         cat_counts = Counter(categorize_rule(f.rule_id) for f in findings)
         parts.append("<div class='filter-row'>")
@@ -3831,6 +4575,7 @@ def to_html(findings: List[Finding], scanned: int, builds: int,
         parts.append("<select id='statusFilter' class='type-filter'>"
                      "<option value=''>All statuses</option>"
                      "<option value='__open'>Open (untriaged)</option>"
+                     "<option value='confirmed'>Confirmed</option>"
                      "<option value='in-review'>In review</option>"
                      "<option value='fixed'>Fixed</option>"
                      "<option value='false-positive'>False positive</option>"
@@ -3850,6 +4595,8 @@ def to_html(findings: List[Finding], scanned: int, builds: int,
             "<button type='button' id='clearTriage' class='mini-btn' "
             "title='Remove all statuses and notes stored in this browser'>Clear</button>"
             "</div>")
+
+    parts.append("<div class='flow-decision-summary' id='flowDecisionSummary' aria-label='Quick filters for flow and control triage decisions'></div><section class='flow-decision-findings' id='flowDecisionFindings' aria-labelledby='flowDecisionFindingsTitle'><div class='flow-decision-findings-head'><div><h2 id='flowDecisionFindingsTitle'>Flow/control triage decisions</h2><p>Decisions created in the Security Flow Explorer and matched by the status filter.</p></div><span class='flow-decision-findings-count' id='flowDecisionFindingsCount'>0 decisions</span></div><div class='flow-decision-findings-list' id='flowDecisionFindingsList'></div></section>")
 
     if not findings:
         parts.append("<div class='empty-note'>No findings above the configured threshold.</div>")
@@ -3904,7 +4651,8 @@ def to_html(findings: List[Finding], scanned: int, builds: int,
             "<div class='triage'><label>Status</label>"
             f"<select class='triage-status' data-fp='{esc(f.fingerprint)}'>"
             "<option value=''>Open</option>"
-            "<option value='in-review'>In review</option>"
+            "<option value='confirmed'>Confirmed</option>"
+                     "<option value='in-review'>In review</option>"
             "<option value='fixed'>Fixed</option>"
             "<option value='false-positive'>False positive</option>"
             "<option value='accepted'>Accepted risk</option>"
@@ -4941,7 +5689,18 @@ public class SpringSecBadMisc {
 
 def run_selftest() -> int:
     tmp = tempfile.mkdtemp(prefix="jspringguard_")
+    coverage_fixture = os.path.join(tmp, 'coverage-fixture')
+    os.makedirs(coverage_fixture, exist_ok=True)
+    with open(os.path.join(coverage_fixture, 'pom.xml'), 'w', encoding='utf-8') as handle:
+        handle.write('<project><modelVersion>4.0.0</modelVersion><groupId>test</groupId>'
+                     '<artifactId>coverage</artifactId><version>1</version></project>')
     for name, content in SAMPLES.items():
+        if name.startswith('Coverage'):
+            content = content.replace('private Object coverageOrderService;',
+                                      'private CoverageOrderService coverageOrderService;')
+            if name == 'CoverageSecurityConfig.java':
+                content = content.replace('public class', '@EnableMethodSecurity\npublic class', 1)
+            name = os.path.join('coverage-fixture', name)
         with open(os.path.join(tmp, name), "w", encoding="utf-8") as fh:
             fh.write(content)
 
@@ -5442,7 +6201,7 @@ def scan(root: str, exts: Tuple[str, ...], exclude: Set[str], skip_tests: bool,
     if coverage_out is not None:
         coverage_entries, coverage_findings = analyze_security_coverage(
             loaded, raw_map, root, context_radius=context_radius, enabled=active_ids,
-            build_files=build_files)
+            build_files=build_files, props_files=props_files)
         coverage_out.extend(coverage_entries)
         findings.extend(coverage_findings)
     for p in template_files:
@@ -5705,6 +6464,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     resolver_incomplete = False
     resolved_dependencies: List[ResolvedDependency] = []
     module_evidence: Dict[str, str] = {}
+    if args.format == "html":
+        args.coverage = True
     coverage_entries: Optional[List[CoverageEntry]] = (
         [] if args.coverage or args.fail_on_coverage_gap else None)
     findings, n_src, n_build = scan(root, exts, exclude, args.skip_tests, args.show_hardened,
@@ -8537,7 +9298,7 @@ def _project_method_summaries(loaded: Dict[str, Tuple[List[str], List[Method]]],
                       re.search(r"@(?:[\w]+\.)*(?:PathVariable|RequestParam|RequestHeader|ModelAttribute)\b",
                                 param)):
                     object_taint[name] = ["request object id", name]
-            line = text.count("\n", 0, start) + 1
+            line = text.count("\n", 0, start + name_match.start(1)) + 1
             summaries.append(ProjectMethodSummary(
                 path=path, rel=os.path.relpath(path, root) if root else path,
                 class_name=_owner_class_name(text, start),
@@ -8781,7 +9542,9 @@ def _coverage_http_methods(annotation: str, arguments: str) -> List[str]:
 
 
 def _coverage_pattern_matches(pattern: str, route: str) -> bool:
-    if pattern in {"/**", "**", "/"}:
+    if pattern in {"/**", "**"}:
+        return True
+    if pattern.endswith("/**") and route == pattern[:-3]:
         return True
     token = re.escape(pattern)
     token = re.sub(r"\\\{[^}]+\\\}", r"[^/]+", token)
@@ -8799,62 +9562,70 @@ def _coverage_module_map(
     return module_map
 
 
-def _coverage_route_policies(
-        loaded: Dict[str, Tuple[List[str], List[Method]]], root: str,
-        module_map: Dict[str, str]) -> List[CoverageRoutePolicy]:
-    policies: List[CoverageRoutePolicy] = []
+def _coverage_route_policies(loaded, root, module_map):
+    """Retain chain boundaries, order, matcher order, permissions and conditions."""
+    policies = []
     for path, (lines, _) in loaded.items():
-        text = "\n".join(lines)
+        text = '\n'.join(lines)
         rel = os.path.relpath(path, root) if root else path
-        for match in _AUTHZ_MATCHER.finditer(text):
-            patterns = re.findall(r"[\x22\x27](/[^\x22\x27]*)[\x22\x27]", match.group("args"))
-            methods = re.findall(r"HttpMethod\s*\.\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)",
-                                 match.group("args"), re.I)
-            policy_method = methods[0].upper() if len(methods) == 1 else "ANY"
-            for pattern in patterns:
-                policies.append(CoverageRoutePolicy(
-                    rel, module_map.get(path, os.path.abspath(root)), match.start(),
-                    text.count("\n", 0, match.start()) + 1,
-                    pattern, match.group("decision"), policy_method))
-        for match in _AUTHZ_ANY_REQUEST.finditer(text):
-            policies.append(CoverageRoutePolicy(
-                rel, module_map.get(path, os.path.abspath(root)), match.start(),
-                text.count("\n", 0, match.start()) + 1,
-                "/**", match.group("decision"), "ANY"))
+        bounds = [(start, body, end) for start, _, _, body, end in _web_methods(text)
+                  if re.search(r'\bSecurityFilterChain\b', text[start:body])]
+        # Also support legacy configure(HttpSecurity) sources conservatively.
+        if not bounds:
+            bounds = [(0, -1, len(text))]
+        class_head = text[:text.find('{')] if '{' in text else ''
+        for chain_start, body, end in bounds:
+            header = text[chain_start:body] if body >= 0 else class_head
+            scope = text[body+1:end]
+            order = re.search(r'@Order\s*\(\s*(\d+)\s*\)', header)
+            order_value = int(order.group(1)) if order else 2147483647
+            chain_patterns = []
+            dynamic_scope = False
+            for matcher in re.finditer(r'\.(?:securityMatchers?|requestMatcher)\s*\(([^)]*)\)', scope):
+                values = re.findall(r'''["'](/[^"']*)["']''', matcher.group(1))
+                chain_patterns.extend(values)
+                if not values: dynamic_scope = True
+            conditions = _coverage_conditions(class_head + '\n' + header)
+            matches = sorted(list(_AUTHZ_MATCHER.finditer(scope)) +
+                             list(_AUTHZ_ANY_REQUEST.finditer(scope)), key=lambda m: m.start())
+            for match in matches:
+                args = match.groupdict().get('args')
+                patterns = re.findall(r'''["'](/[^"']*)["']''', args) if args is not None else ['/**']
+                # A dynamic earlier matcher can change the first-match result.
+                if not patterns: patterns = ['<dynamic>']
+                verbs = re.findall(r'HttpMethod\s*\.\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)', args or '')
+                decision_open = body+1+match.end()-1
+                decision_end = _closing(text, decision_open)
+                decision_text = text[body+1+match.start():decision_end+1] if decision_end >= 0 else match.group(0)
+                for pattern in patterns:
+                    for verb in verbs or ['ANY']:
+                        position = body+1+match.start()
+                        item = CoverageRoutePolicy(rel, module_map.get(path, os.path.abspath(root)),
+                            position, text.count('\n', 0, position)+1, pattern,
+                            match.group('decision'), verb)
+                        item.chain = (rel, chain_start)
+                        item.order = order_value
+                        item.chain_patterns = chain_patterns
+                        item.dynamic_scope = dynamic_scope
+                        item.conditions = conditions
+                        item.permissions = _coverage_permissions(decision_text, item.decision.lower())
+                        item.expression = decision_text
+                        policies.append(item)
     return policies
 
 
-def _coverage_policy_for_route(
-        policies: Sequence[CoverageRoutePolicy], route: str,
-        http_method: str = "ANY", module: str = "") -> Tuple[str, List[str]]:
-    """Resolve the first matching authorization rule per configuration file."""
-    by_file: Dict[str, List[CoverageRoutePolicy]] = {}
-    for policy in policies:
-        if module and policy.module != module:
-            continue
-        by_file.setdefault(policy.file, []).append(policy)
-    matches: List[CoverageRoutePolicy] = []
-    for file_policies in by_file.values():
-        for policy in sorted(file_policies, key=lambda item: item.position):
-            if (policy.http_method in {"ANY", http_method} and
-                    _coverage_pattern_matches(policy.pattern, route)):
-                matches.append(policy)
-                break
-    if not matches:
-        return "unknown", ["No statically resolvable SecurityFilterChain rule matched the route"]
-    # A route-specific matcher is more informative than unrelated catch-all
-    # policies from other filter-chain configurations/modules.
-    def specificity(policy: CoverageRoutePolicy) -> int:
-        literal = re.sub(r"\{[^}]+\}|\*+", "", policy.pattern)
-        return len(literal.strip("/"))
-    best = max(specificity(policy) for policy in matches)
-    matches = [policy for policy in matches if specificity(policy) == best]
-    decisions = {policy.decision.lower() for policy in matches}
-    evidence = [f"{policy.http_method} {policy.pattern}.{policy.decision}() at "
-                f"{policy.file}:{policy.line}"
-                for policy in matches]
-    if len(decisions) > 1:
-        return "unknown", ["Conflicting route policies: " + "; ".join(evidence)]
+def _coverage_policy_for_route(policies, route, http_method='ANY', module=''):
+    selected = _coverage_selected_policies(policies, route, http_method, module)
+    if not selected:
+        return 'unknown', ['No statically resolvable SecurityFilterChain rule matched the route']
+    evidence = [f'{p.http_method} {getattr(p, "expression", p.pattern + "." + p.decision + "()")} at '
+                f'{p.file}:{p.line}' + (' [' + '; '.join(p.conditions) + ']'
+                    if getattr(p, 'conditions', []) else '') for p in selected]
+    decisions = {p.decision.lower() for p in selected}
+    ambiguous = len(selected) > 1 or any(p.pattern == '<dynamic>' or
+                                       getattr(p, 'dynamic_scope', False) for p in selected)
+    if ambiguous or len(decisions) != 1:
+        return 'unknown', ['Ambiguous chain order, activation, or dynamic matcher'] + evidence
     return next(iter(decisions)), evidence
 
 
@@ -8866,59 +9637,8 @@ def _coverage_method_label(method: ProjectMethodSummary) -> str:
     return f"{method.class_name}.{method.name}()"
 
 
-def _coverage_reachable_methods(
-        entry: ProjectMethodSummary, methods: Sequence[ProjectMethodSummary],
-        module_map: Optional[Dict[str, str]] = None) -> Dict[str, Tuple[ProjectMethodSummary, List[str]]]:
-    """Build a bounded, conservative name-based project call graph."""
-    by_name: Dict[str, List[ProjectMethodSummary]] = {}
-    entry_module = module_map.get(entry.path, "") if module_map else ""
-    for method in methods:
-        if module_map and module_map.get(method.path, "") != entry_module:
-            continue
-        by_name.setdefault(method.name, []).append(method)
-    reached: Dict[str, Tuple[ProjectMethodSummary, List[str]]] = {}
-    queue: List[Tuple[ProjectMethodSummary, List[str], int]] = [
-        (entry, [_coverage_method_label(entry)], 0)]
-    while queue and len(reached) < 250:
-        method, path, depth = queue.pop(0)
-        key = _coverage_method_key(method)
-        if key in reached:
-            continue
-        reached[key] = (method, path)
-        if depth >= 8:
-            continue
-        called: List[Tuple[str, str]] = []
-        masked = _structure_mask(method.body)
-        for call in re.finditer(
-                r"\b(?:(?P<receiver>[A-Za-z_$][\w$]*)\s*\.\s*)?"
-                r"(?P<name>[A-Za-z_$][\w$]*)\s*\(", masked):
-            receiver, name = call.group("receiver") or "", call.group("name")
-            item = (receiver, name)
-            if name in by_name and item not in called:
-                called.append(item)
-        for receiver, name in called:
-            candidates = by_name[name]
-            if receiver:
-                normalized_receiver = re.sub(r"[^a-z0-9]", "", receiver.lower())
-                receiver_matches = [candidate for candidate in candidates
-                                    if (lambda class_name: class_name == normalized_receiver or
-                                        class_name.startswith(normalized_receiver) or
-                                        normalized_receiver.startswith(class_name))(
-                                            re.sub(r"[^a-z0-9]", "", candidate.class_name.lower()))]
-                if receiver_matches:
-                    candidates = receiver_matches
-            else:
-                local_matches = [candidate for candidate in candidates
-                                 if candidate.class_name == method.class_name]
-                if local_matches:
-                    candidates = local_matches
-            # Prefer a unique project method. If several overloads/classes match,
-            # traverse all of them and let UNKNOWN evidence expose ambiguity.
-            for callee in candidates[:12]:
-                if _coverage_method_key(callee) == key:
-                    continue
-                queue.append((callee, path + [_coverage_method_label(callee)], depth + 1))
-    return reached
+def _coverage_reachable_methods(entry, methods, module_map=None):
+    return _coverage_graph(entry, methods, module_map)[0]
 
 
 def _coverage_entry_methods(
@@ -8959,7 +9679,7 @@ def _coverage_finding(
         context=context_lines(raw_lines, method.line, context_radius))
 
 
-def analyze_security_coverage(
+def _analyze_security_coverage_base(
         loaded: Dict[str, Tuple[List[str], List[Method]]], raw_map: Dict[str, List[str]],
         root: str, context_radius: int = CONTEXT_RADIUS,
         enabled: Optional[Set[str]] = None,
@@ -10260,6 +10980,389 @@ def offline_database_error_types():
     return (OSError, ValueError, sqlite3.Error, zipfile.BadZipFile, KeyError, TypeError)
 
 
+
+COVERAGE_DASHBOARD_HTML = "<div class='coverage-dashboard' id='coverageDashboard'><aside class='coverage-sidebar' aria-label='Security entry points'><input class='coverage-search' id='coverageSearch' type='search' placeholder='Filter entry points…' aria-label='Filter security entry points'><label class='coverage-filter-label' for='coverageFlowFilter'>Reference flow</label><select class='coverage-flow-filter' id='coverageFlowFilter' aria-label='Filter by reference flow'><option value='all'>All entry points</option><option value='has-flow'>Reference flow exists</option><option value='no-flow'>No reference flow</option><option value='sensitive'>Sensitive sink exists</option><option value='unresolved'>Unresolved boundary exists</option><option value='risk'>Prioritized attack path</option></select><div class='coverage-entry-list' id='coverageEntryList'></div></aside><div class='coverage-main'><div class='coverage-overview'><div><h3 id='coverageEntryName'></h3><p id='coverageEntryLocation'></p></div><div class='coverage-overview-actions'><span class='coverage-state COVERED' id='coverageEntryState'></span></div></div><section class='coverage-panel'><div class='coverage-panel-head'><h4>Effective security configuration</h4></div><dl class='coverage-policy' id='coveragePolicy'></dl><div class='coverage-source-links'><button type='button' class='coverage-source-link' id='coveragePolicySource'>Peek configuration source</button></div></section><section class='coverage-panel'><div class='coverage-panel-head'><h4>Reachable processing flow</h4><span class='coverage-subtitle'>Select a node for source details</span></div><div class='coverage-flow' id='coverageFlow'></div></section><section class='coverage-panel coverage-code-panel' aria-labelledby='coverageCodeTitle'><div class='coverage-code-head'><h4 class='coverage-code-title' id='coverageCodeTitle'>Source code preview</h4><span class='coverage-code-location' id='coverageCodeLocation'></span></div><pre class='coverage-code-frame' id='coverageCodeFrame'></pre></section><section class='coverage-panel coverage-reference-panel' aria-labelledby='coverageReferenceTitle'><div class='coverage-panel-head'><h4 id='coverageReferenceTitle'>Find All References</h4><span class='coverage-subtitle' id='coverageReferenceCount'></span></div><div class='coverage-reference-list' id='coverageReferenceList'></div></section><section class='coverage-panel'><div class='coverage-panel-head'><h4>Required security controls</h4><span class='coverage-subtitle'>Select a control for evidence</span></div><div class='coverage-controls' id='coverageControls'></div></section><aside class='coverage-panel coverage-detail coverage-control-decision-panel' id='coverageDetail' aria-live='polite'><div class='coverage-detail-title' id='coverageDetailTitle'></div><div id='coverageDetailBody'></div><div class='coverage-control-triage-editor' id='coverageControlTriage'></div></aside><section class='coverage-panel coverage-flow-triage-panel' aria-labelledby='coverageFlowDecisionTitle'><div class='coverage-panel-head'><div><h4 id='coverageFlowDecisionTitle'>Complete flow triage</h4><p class='coverage-subtitle'>Applies to the complete selected entry-point path.</p></div></div><div class='coverage-flow-triage-fields'><div class='coverage-flow-triage-field'><label for='coverageFlowDecision'>Flow triage status</label><select class='coverage-flow-decision' id='coverageFlowDecision' aria-label='Set complete flow triage status'><option value=''>Open / untriaged</option><option value='confirmed'>Confirmed</option><option value='false-positive'>False Positive</option><option value='accepted-risk'>Accepted Risk</option><option value='fixed'>Fixed</option></select></div><div class='coverage-flow-triage-field'><label for='coverageFlowDecisionNote'>Flow decision note</label><input class='coverage-flow-note' id='coverageFlowDecisionNote' type='text' placeholder='Decision note or evidence…'></div></div></section></div></div>"
+
+COVERAGE_POLICY_TOOLS_HTML = "<div class='coverage-policy-tools'><span class='coverage-policy-tools-title'>Security policy history</span><button class='coverage-policy-action' id='exportPolicySnapshot' type='button'>Export current policy snapshot</button><label class='coverage-policy-action' for='importPolicySnapshot'>Compare previous snapshot<input id='importPolicySnapshot' type='file' accept='application/json,.json' hidden></label></div><section class='coverage-drift' id='coverageDrift' aria-labelledby='coverageDriftTitle'><div class='coverage-drift-head'><h3 id='coverageDriftTitle'>Security policy drift</h3><span class='coverage-drift-summary' id='coverageDriftSummary'></span></div><div class='coverage-drift-list' id='coverageDriftList'></div></section>\n"
+
+COVERAGE_TRIAGE_BAR_HTML = '<div class=\'flow-triage-bar\'><span class=\'flow-triage-count\' id=\'flowTriageCount\'>Triaged <b>0</b> flow controls</span><button class=\'flow-triage-action\' type=\'button\' onclick="document.getElementById(\'importFlowTriage\').click()">Import decisions</button><input id=\'importFlowTriage\' type=\'file\' accept=\'application/json,.json\' hidden></div>\n'
+
+# Security Flow Explorer. All report assets are embedded above; no runtime
+# template, JavaScript package, network connection or extra Python package.
+
+def _coverage_source(rel, line, raw_map, root, label='', kind='METHOD', radius=6):
+    path = os.path.normpath(os.path.join(root, rel))
+    rows = raw_map.get(path)
+    if rows is None:
+        rows = next((value for key, value in raw_map.items()
+                     if os.path.normcase(os.path.abspath(key)) ==
+                     os.path.normcase(os.path.abspath(path))), [])
+    return {'label': label, 'file': rel.replace('\\', '/'), 'line': line,
+            'kind': kind, 'context': [
+                {'line': n, 'text': text, 'hit': n == line}
+                for n, text in context_lines(rows, line, radius)]}
+
+
+def _coverage_conditions(text):
+    result = []
+    names = {'Profile': 'Profile', 'ConditionalOnProperty': 'Property condition',
+             'ConditionalOnBean': 'Bean present', 'ConditionalOnMissingBean': 'Bean absent',
+             'ConditionalOnExpression': 'Expression', 'Conditional': 'Custom condition'}
+    for match in re.finditer(r'@(?:[\w]+\.)*(' + '|'.join(names) + r')\s*\(', text):
+        opening = text.index('(', match.start())
+        closing = _closing(text, opening)
+        if closing >= 0:
+            result.append(names[match.group(1)] + ': ' +
+                          re.sub(r'\s+', ' ', text[opening+1:closing]).strip())
+    return sorted(set(result))
+
+
+def _coverage_permissions(text, decision=''):
+    permissions = []
+    for match in re.finditer(r'\b(hasRole|hasAnyRole|hasAuthority|hasAnyAuthority)\s*\(([^)]*)\)', text, re.I):
+        for permission in re.findall(r'''["']([^"']+)["']''', match.group(2)):
+            permissions.append(('ROLE_' if 'role' in match.group(1).lower() else '') + permission)
+    for match in re.finditer(r'@(?:Secured|RolesAllowed)\s*\(([^)]*)\)', text):
+        permissions.extend(re.findall(r'''["']([^"']+)["']''', match.group(1)))
+    if decision in {'permitall', 'anonymous'}:
+        permissions.append('PUBLIC' if decision == 'permitall' else 'ANONYMOUS')
+    elif decision == 'denyall':
+        permissions.append('DENIED')
+    elif decision in {'authenticated', 'fullyauthenticated', 'rememberme', 'hasrole',
+                      'hasanyrole', 'hasauthority', 'hasanyauthority'} or permissions:
+        permissions.append('AUTHENTICATED')
+    return sorted(set(permissions))
+
+
+
+
+def _coverage_selected_policies(policies, route, http_method, module):
+    chains = {}
+    for item in policies:
+        if module and item.module != module: continue
+        chains.setdefault(getattr(item, 'chain', (item.file, 0)), []).append(item)
+    candidates = []
+    for chain in chains.values():
+        first = chain[0]
+        patterns = getattr(first, 'chain_patterns', [])
+        if patterns and not any(_coverage_pattern_matches(p, route) for p in patterns): continue
+        for item in sorted(chain, key=lambda p: p.position):
+            if item.http_method in {'ANY', http_method} and (
+                    item.pattern == '<dynamic>' or _coverage_pattern_matches(item.pattern, route)):
+                candidates.append(item)
+                break
+        else:
+            # A selected chain without an authorization match must not fall
+            # through to a lower-priority chain and invent a policy.
+            unknown = CoverageRoutePolicy(first.file, first.module, first.position,
+                first.line, route, 'unknown', http_method)
+            unknown.__dict__.update({k: v for k, v in first.__dict__.items()
+                                    if k not in unknown.__dict__})
+            candidates.append(unknown)
+    candidates.sort(key=lambda p: getattr(p, 'order', 2147483647))
+    if not candidates: return []
+    chosen = []
+    priority = None
+    for item in candidates:
+        order = getattr(item, 'order', 2147483647)
+        if priority is not None and order > priority: break
+        chosen.append(item)
+        if not getattr(item, 'conditions', []) and not getattr(item, 'dynamic_scope', False):
+            priority = order
+    return chosen
+
+
+
+
+def _coverage_graph(entry, methods, module_map=None):
+    """Bounded call graph: resolve receiver types; retain ambiguous/external boundaries.
+
+    Framework repository calls are terminal sinks. Unsupported reflection, proxy
+    dispatch and library implementations are not represented as proven calls.
+    """
+    module = module_map.get(entry.path, '') if module_map else ''
+    available = [m for m in methods if not module_map or module_map.get(m.path, '') == module]
+    by_name = {}
+    source = {}
+    for method in available:
+        by_name.setdefault(method.name, []).append(method)
+        if method.path not in source:
+            try:
+                with open(method.path, encoding='utf-8', errors='replace') as handle:
+                    source[method.path] = strip_comments(handle.read())
+            except OSError: source[method.path] = ''
+    reached, unresolved, queue = {}, [], [(entry, [_coverage_method_label(entry)], 0)]
+    benign_receivers = {'System', 'Math', 'String', 'Objects', 'Collections', 'List', 'Map',
+                        'Set', 'Optional', 'ResponseEntity', 'log', 'logger', 'LOGGER'}
+    while queue:
+        method, path, depth = queue.pop(0)
+        key = _coverage_method_key(method)
+        if key in reached: continue
+        if len(reached) >= 250:
+            unresolved.append('Analysis limit: more than 250 reachable methods')
+            break
+        reached[key] = (method, path)
+        masked = _structure_mask(method.body)
+        for call in re.finditer(r'\b(?:(?P<receiver>[A-Za-z_$][\w$]*)\s*\.\s*)?'
+                               r'(?P<name>[A-Za-z_$][\w$]*)\s*\(', masked):
+            receiver, name = call.group('receiver') or '', call.group('name')
+            if name in {'if','for','while','switch','catch','synchronized','super','this','return','new'}: continue
+            # Skip constructor and chained suffix matches already represented by
+            # the root call; chained dispatch cannot be reconstructed reliably.
+            before = masked[max(0,call.start()-5):call.start()]
+            if re.search(r'new\s*$', before): continue
+            candidates = by_name.get(name, [])
+            if receiver in {'', 'this'}:
+                candidates = [m for m in candidates if m.class_name == method.class_name]
+            else:
+                declaration = re.search(r'\b([A-Z][\w$]*)(?:\s*<[^;=(){}]+>)?\s+' +
+                                        re.escape(receiver) + r'\b', source.get(method.path,''))
+                receiver_type = declaration.group(1) if declaration else receiver
+                direct = [m for m in candidates if m.class_name.lower() == receiver_type.lower()]
+                implementations = [m for m in candidates if re.search(
+                    r'\bclass\s+'+re.escape(m.class_name)+r'\b[^{}]*\b(?:implements|extends)\s+'
+                    r'[^{}]*\b'+re.escape(receiver_type)+r'\b',source.get(m.path,''))]
+                candidates = direct or implementations
+            label = ' -> '.join(path + [(receiver+'.' if receiver else '')+name+'()'])
+            location = f' [{method.rel}:{method.line}]'
+            if len(candidates) == 1 and depth < 8:
+                callee = candidates[0]
+                queue.append((callee,path+[_coverage_method_label(callee)],depth+1))
+            elif candidates:
+                unresolved.append(label+location+(' (depth limit)' if depth >= 8 else ' (ambiguous target)'))
+            elif receiver and receiver not in benign_receivers:
+                call_text = method.body[call.start():call.end()]
+                if _COVERAGE_SENSITIVE_SINK.search(call_text): continue
+                # Field/injected collaborators and sensitive dynamic operations
+                # remain review boundaries; value-object accessors are omitted.
+                declared = re.search(r'\b[A-Z][\w$]*(?:\s*<[^;={}]+>)?\s+'+re.escape(receiver)+r'\b',
+                                     source.get(method.path,''))
+                if (declared and not name.startswith(('get','is','to','equals','hashCode'))) or re.search(
+                        r'(service|gateway|client|adapter|port|handler|processor|manager)$',receiver,re.I) or name in {'invoke','loadClass'}:
+                    unresolved.append(label+location)
+    return reached, sorted(set(unresolved))
+
+
+
+
+def coverage_attack_paths(entries):
+    paths = []
+    for index, entry in enumerate(entries):
+        if not entry.sensitive_sinks and not entry.unresolved_calls: continue
+        missing = [key for key,value in entry.controls.items() if value == 'MISSING']
+        unknown = [key for key,value in entry.controls.items() if value == 'UNKNOWN']
+        if not missing and not unknown: continue
+        public = entry.route_policy in {'permitall','anonymous'}
+        score = min(100, (30 if public else 0) + 15*len(missing) + 8*len(unknown) +
+                    (15 if entry.sensitive_sinks else 0) + (10 if entry.unresolved_calls else 0))
+        severity = 'CRITICAL' if score >= 85 else 'HIGH' if score >= 60 else 'MEDIUM' if score >= 30 else 'LOW'
+        reasons = (['Publicly reachable route policy'] if public else []) + [
+            key.replace('_',' ').title()+' is missing' for key in missing] + [
+            key.replace('_',' ').title()+' is unknown' for key in unknown]
+        paths.append({'entry_index': index, 'entrypoint': entry.entrypoint,
+                      'score': score, 'severity': severity, 'reasons': reasons,
+                      'flow': entry.flow})
+    return sorted(paths, key=lambda p: (-p['score'], p['entrypoint']))
+
+
+def analyze_security_coverage(loaded, raw_map, root, context_radius=CONTEXT_RADIUS,
+                              enabled=None, build_files=(), props_files=()):
+    entries, findings = _analyze_security_coverage_base(
+        loaded, raw_map, root, context_radius, enabled, build_files)
+    methods = _project_method_summaries(loaded, root)
+    module_map = _coverage_module_map(loaded, root, build_files)
+    policies = _coverage_route_policies(loaded, root, module_map)
+    entry_methods = _coverage_entry_methods(methods, loaded)
+    entry_methods.sort(key=lambda item: (item[1],
+        (item[2]+' '+item[3]) if item[1]=='HTTP' else (item[1]+' '+item[3]),
+        item[0].rel, item[0].line))
+    patterns = {'authentication': _COVERAGE_AUTHN, 'authorization': _COVERAGE_METHOD_AUTHZ_ANNOTATION,
+                'tenant': _COVERAGE_TENANT_BINDING, 'validation': _COVERAGE_VALIDATION,
+                'rate_limit': _COVERAGE_RATE_LIMIT, 'audit': _COVERAGE_AUDIT}
+    for entry, (method, kind, verb, target) in zip(entries, entry_methods):
+        reached, unresolved = _coverage_graph(method, methods, module_map)
+        entry.file = entry.file.replace('\\','/')
+        entry.unresolved_calls = unresolved
+        entry.controls['path_resolution'] = 'UNKNOWN' if unresolved else 'COVERED'
+        entry.evidence['path_resolution'] = unresolved or [
+            'All recognized project call boundaries resolved within analysis limits; unsupported syntax is not proven.']
+        entry.semantic_facts = {'analysis': 'bounded static heuristics', 'max_depth': 8,
+                                'max_methods': 250, 'reachable_methods': len(reached)}
+        if kind == 'HTTP':
+            entry.route_policy, entry.policy_evidence = _coverage_policy_for_route(
+                policies, target, verb, module_map.get(method.path,''))
+            selected = _coverage_selected_policies(policies,target,verb,module_map.get(method.path,''))
+        else:
+            entry.route_policy, entry.policy_evidence = 'not_required', ['Non-HTTP entry point']
+            selected = []
+        permissions = set()
+        for policy in selected:
+            entry.policy_sources.append(_coverage_source(policy.file,policy.line,raw_map,root,
+                getattr(policy,'expression',policy.pattern), 'CONFIG'))
+            entry.policy_conditions.extend(getattr(policy,'conditions',[]))
+            permissions.update(getattr(policy,'permissions',[]))
+        module = module_map.get(method.path,'')
+        security_enabled = any(_METHOD_SECURITY_ENABLE.search('\n'.join(lines))
+                               for path,(lines,_) in loaded.items() if module_map.get(path,'') == module)
+        for current, path in reached.values():
+            text = '\n'.join(loaded[current.path][0])
+            # The original parser starts at the preceding delimiter; point to
+            # the method declaration instead of the preceding class/field line.
+            name_match = re.search(r'\b'+re.escape(current.name)+r'\s*\(', current.header)
+            line = text.count('\n',0,current.start+(name_match.start() if name_match else 0))+1
+            source = _coverage_source(current.rel,line,raw_map,root,_coverage_method_label(current))
+            source.update({'class_name': current.class_name,'method':current.name,'path':path})
+            if current is method or _coverage_method_key(current)==_coverage_method_key(method):
+                source['kind']='ENTRYPOINT'
+                entry.line=line
+            entry.flow_steps.append(source)
+            class_head=text[:text.find('{')] if '{' in text else ''
+            entry.activation_conditions.extend(_coverage_conditions(class_head+'\n'+current.header))
+            if security_enabled: permissions.update(_coverage_permissions(current.header))
+            for sink in _COVERAGE_SENSITIVE_SINK.finditer(current.body):
+                sink_line=text.count('\n',0,current.body_offset+sink.start())+1
+                sink_name=(sink.group(2) or sink.group(3) or 'sensitive operation')+'()'
+                sink_source=_coverage_source(current.rel,sink_line,raw_map,root,sink_name,'SINK')
+                sink_source['path']=path+[sink_name]
+                entry.sinks.append(sink_source)
+            scope=current.header+'\n'+current.body
+            for control, pattern in patterns.items():
+                for match in pattern.finditer(scope):
+                    # Header/body join inserts a newline in place of the brace.
+                    evidence_line=text.count('\n',0,current.start+match.start())+1
+                    entry.control_sources.setdefault(control,[]).append(_coverage_source(
+                        current.rel,evidence_line,raw_map,root,match.group(0),'CONTROL'))
+        for key in ('authentication','authorization'):
+            entry.control_sources.setdefault(key,[]).extend(entry.policy_sources)
+        entry.required_permissions=sorted(permissions)
+        entry.policy_conditions=sorted(set(entry.policy_conditions))
+        entry.activation_conditions=sorted(set(entry.activation_conditions))
+        for config in props_files:
+            # Only retain configuration belonging to the current build module.
+            directory=os.path.dirname(os.path.abspath(config))
+            try:
+                if module and os.path.commonpath([directory,module]) != module: continue
+            except ValueError: continue
+            rel=os.path.relpath(config,root).replace('\\','/')
+            profile=re.search(r'application-([^.]+)\.(?:properties|ya?ml)$',config)
+            if profile: entry.configuration_profiles.append('Profile file: '+profile.group(1)+' ('+rel+')')
+            try:
+                with open(config,encoding='utf-8',errors='replace') as handle: config_text=handle.read()
+            except OSError: continue
+            for match in re.finditer(r'^\s*(?:spring\.config\.activate\.on-profile|spring\.profiles\.active|on-profile)\s*[:=]\s*([^\n#]+)',config_text,re.M):
+                entry.configuration_profiles.append('Document profile: '+match.group(1).strip()+' ('+rel+')')
+        entry.configuration_profiles=sorted(set(entry.configuration_profiles))
+        entry.reference_flow=bool(len(entry.flow_steps)>1 or entry.sinks or unresolved)
+        if unresolved and not entry.sensitive_sinks:
+            # An external implementation may contain sensitive operations. Its
+            # absence from the local sink inventory does not establish N/A.
+            for control in ('authentication','authorization','audit'):
+                if entry.controls.get(control) != 'NOT_REQUIRED': continue
+                if control == 'authentication' and kind == 'Scheduled': continue
+                if control == 'audit' and verb in {'GET','HEAD','OPTIONS'}: continue
+                entry.controls[control]='UNKNOWN'
+                entry.evidence[control]=['An unresolved implementation may require this control; inspect the external boundary.']
+                if control == 'authentication' and entry.route_policy in {
+                        'authenticated','fullyauthenticated','rememberme','hasrole',
+                        'hasanyrole','hasauthority','hasanyauthority'}:
+                    entry.controls[control]='COVERED'
+                    entry.evidence[control]=entry.policy_evidence[:]
+                if control == 'authorization' and entry.route_policy in {
+                        'hasrole','hasanyrole','hasauthority','hasanyauthority','denyall'}:
+                    entry.controls[control]='COVERED'
+                    entry.evidence[control]=entry.policy_evidence[:]
+        uncertainty=['Heuristic source analysis does not prove execution order, branch dominance or runtime wiring.']
+        if entry.policy_conditions or entry.activation_conditions:
+            uncertainty.append('Runtime activation depends on Spring profiles or conditional beans.')
+        if unresolved: uncertainty.append('External or ambiguous implementations remain unresolved.')
+        for control,status in entry.controls.items():
+            entry.control_explanations[control]={
+                'summary':' '.join(entry.evidence.get(control,[])),
+                'why': {'COVERED':'Matching static evidence was found in the inspected path; verify runtime enforcement.',
+                        'MISSING':'The path requires this control but no matching enforcement was identified.',
+                        'UNKNOWN':'Available source and configuration cannot establish the control.',
+                        'NOT_REQUIRED':'The recognized path classification does not require this control.'}[status],
+                'inspected':[f'Effective route policy: {entry.route_policy}',
+                             f'Reachable methods inspected: {len(reached)}',f'Sensitive sinks inspected: {len(entry.sinks)}'],
+                'uncertainty':uncertainty, 'confidence':'REVIEW',
+                'found':entry.evidence.get(control,[])}
+        if unresolved and (enabled is None or 'SECURITY-CONTROL-UNRESOLVED-PATH' in enabled):
+            finding=_coverage_finding(entry,method,'SECURITY-CONTROL-UNRESOLVED-PATH','MEDIUM',
+                entry.entrypoint+' crosses unresolved code. '+unresolved[0],raw_map,context_radius)
+            if not finding_suppressed(raw_map.get(method.path,[]),finding): findings.append(finding)
+    return entries, findings
+
+
+def coverage_explorer_html(entries):
+    esc=html_mod.escape
+    payload=coverage_payload(entries)
+    totals=payload['summary']
+    parts=["<section class='coverage-wrap' id='security-flow' aria-labelledby='coverageHeading'>",
+           "<div class='coverage-title'><div><h2 id='coverageHeading'>Security flow explorer</h2>"
+           "<p class='coverage-subtitle'>Select an entry point to trace code, effective security configuration, controls, and sensitive sinks.</p></div>"
+           "<div class='coverage-totals'>"]
+    for status,count in totals.items():
+        parts.append(f"<span class='coverage-total cov-{esc(status)}'>{esc(status)} {count}</span>")
+    flows=sum(entry.reference_flow for entry in entries)
+    parts.append(f"<span class='coverage-total'>{flows} REFERENCE FLOW</span>"
+                 f"<span class='coverage-total'>{len(entries)-flows} NO FLOW</span></div></div>")
+    parts.extend([COVERAGE_TRIAGE_BAR_HTML,COVERAGE_POLICY_TOOLS_HTML])
+    attacks=payload['attack_paths']
+    parts.append("<section class='coverage-attack-section' aria-labelledby='coverageAttackHeading'>"
+        "<div class='coverage-attack-head'><div><h3 id='coverageAttackHeading'>Risk-based attack paths</h3>"
+        "<p>Prioritized public or insufficiently protected paths to sensitive operations. Heuristic ranking, not CVSS.</p></div>"
+        f"<span class='coverage-total'>{len(attacks)} PRIORITIZED</span></div><div class='coverage-attack-list' id='coverageAttackList'>")
+    for attack in attacks:
+        sev=attack['severity']
+        parts.append(f"<button class='coverage-attack {sev}' type='button' data-attack-entry='{attack['entry_index']}'>"
+            f"<span class='coverage-attack-top'><span class='badge {sev}'>{sev}</span>"
+            f"<span class='coverage-attack-score'>Risk {attack['score']}/100</span></span>"
+            f"<span class='coverage-attack-label'>{esc(attack['entrypoint'])}</span>"
+            f"<span class='coverage-attack-reason'>{esc(' · '.join(attack['reasons']))}</span></button>")
+    if not attacks: parts.append("<div class='coverage-detail-empty'>No prioritized attack paths identified.</div>")
+    parts.append('</div></section>')
+    permissions=sorted({p for entry in entries for p in entry.required_permissions})
+    parts.append("<section class='coverage-permission-section' aria-labelledby='coveragePermissionHeading'>"
+        "<div class='coverage-permission-head'><h3 id='coveragePermissionHeading'>Roles and permissions matrix</h3>"
+        "<p>Extracted policy requirements; this is not an access grant table. Conditional cells require runtime review.</p></div>"
+        "<div class='coverage-permission-scroll'><table class='coverage-permission-table'><thead><tr><th>Entry point</th>"+
+        ''.join('<th>'+esc(p)+'</th>' for p in permissions)+'</tr></thead><tbody>')
+    for entry in entries:
+        parts.append('<tr><td><code>'+esc(entry.entrypoint)+'</code></td>')
+        for permission in permissions:
+            present=permission in entry.required_permissions
+            conditional=bool(entry.policy_conditions or entry.activation_conditions or entry.route_policy=='unknown')
+            state='conditional' if present and conditional else 'yes' if present else 'no'
+            label='COND' if present and conditional else 'YES' if present else '—'
+            parts.append(f"<td class='coverage-permission-{state}'>{label}</td>")
+        parts.append('</tr>')
+    parts.append('</tbody></table></div></section>')
+    if entries: parts.append(COVERAGE_DASHBOARD_HTML)
+    else: parts.append("<p class='coverage-detail-empty'>No supported HTTP, listener, or scheduled entry points were found.</p>")
+    parts.append("<details class='coverage-static'><summary>Security control coverage matrix</summary>"
+                 "<table class='coverage-table'><thead><tr><th>Entry point</th>"+
+                 ''.join('<th>'+esc(label)+'</th>' for _,label in _COVERAGE_COLUMNS)+'</tr></thead><tbody>')
+    for entry in entries:
+        parts.append('<tr><td>'+esc(entry.entrypoint)+'</td>')
+        for key,_ in _COVERAGE_COLUMNS:
+            status=entry.controls.get(key,'UNKNOWN')
+            parts.append(f"<td class='cov-{esc(status)}'>{esc(_COVERAGE_MARK.get(status,status))}</td>")
+        parts.append('</tr>')
+    parts.append('</tbody></table></details>')
+    # Source can contain HTML/script terminators. JSON must remain inert data.
+    data=json.dumps(payload,ensure_ascii=True).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
+    parts.append("<script type='application/json' id='coverageData'>"+data+'</script></section>')
+    return '\n'.join(parts)
+
+
+_UNRESOLVED_RULE = Rule('SECURITY-CONTROL-UNRESOLVED-PATH',
+    'Security-sensitive path crosses unresolved code', re.compile(r'(?!)'), 'MEDIUM', [], [],
+    'A reachable collaborator or ambiguous call could not be resolved statically.',
+    always_report=True, kind='antipattern', fix=FIX_COVERAGE_CONTROLS)
+RULES.append(_UNRESOLVED_RULE)
+RULE_BY_ID[_UNRESOLVED_RULE.rid] = _UNRESOLVED_RULE
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
@@ -10272,5 +11375,3 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(0)
-
-```
